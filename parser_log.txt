@@ -1,0 +1,14 @@
+=== Java Parser 开始运行 ===
+参数数量: 2
+输入文件: SyntaxTest.java
+已设置输入文件
+开始词法分析...
+词法分析完成，共找到 990 个 token
+Token 列表已打印
+
+开始语法分析和 AST 构建...
+语法分析结果: 1
+解析失败！
+错误: root_ast 为 NULL
+
+=== Java Parser 运行结束 ===
