@@ -20,6 +20,7 @@ typedef struct AstNode AstNode;
 // 声明但不定义变量
 extern int Index[MAX];
 extern char* Token[MAX];
+extern int TokenLine[MAX];
 extern int count;
 // extern int current_token_line;   
 

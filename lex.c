@@ -11,6 +11,8 @@
 extern int Index[MAX];
 extern char* Token[MAX];
 extern int count;
+extern int TokenLine[MAX];
+extern YYLTYPE yylloc;
 
 FILE *yyin;
 
@@ -2299,7 +2301,6 @@ int main()
         // 错误处理逻辑
         fprintf(stderr, "Lexical analysis failed!\\n");
         fprintf(stderr, "Lexical analysis failed!
-");
         freeTokens(); // 确保释放动态分配的内存
         fclose(f);    // 关闭文件
         return -1;    // 或者其他适当的错误返回�?
@@ -2398,39 +2399,35 @@ int init_token_list() {
 
 // 供解析器调用�?yylex 函数
 int yylex(void) {
-    static int token_pos = 0;  // 跟踪当前token位置
-    // printf("check_yylex\n");
-    
-    // 确保已初始化token列表
+    static int token_pos = 0;  // current token index
+
     if (token_list == NULL) {
         init_token_list();
     }
-    
-    // 检查是否到达token列表末尾
-    if (token_list[token_pos] == -2 || token_pos >= count) {
-        return 0;  // 返回0表示EOF
+
+    if (token_pos >= token_index) {
+        return 0;  // EOF
     }
 
-    int line = -1;
+    int line = (token_pos < MAX) ? TokenLine[token_pos] : -1;
     int token = token_list[token_pos];
+    if (token == -2) {
+        return 0;
+    }
     const char *lexeme = Token[token_pos];
     yylval.node = NULL;
+    yylloc.first_line = (line > 0) ? line : 0;
+    yylloc.last_line = yylloc.first_line;
+    yylloc.first_column = 1;
+    yylloc.last_column = 1;
     AstNode *token_node = make_token_node(token, lexeme, line);
     if (token_node) {
         yylval.node = token_node;
     }
 
-    // if(current_line == 295){
-    //     printf("停在�?%d �?token : %d\n",TokenLine[token_pos],token_list[token_pos]);
-    // }
-
-    // printf("停在�?%d �?token : %d\n",TokenLine[token_pos],token_list[token_pos]);
-    
-    // 返回下一个token
     token_pos++;
-    return token; // 返回预生成的 Token
+    return token;
 }
-
 
 
 

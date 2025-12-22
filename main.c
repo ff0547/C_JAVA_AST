@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
         fflush(log);
     }
 
-    // 设置输入文件名
+    // ???????
     set_input_file(argv[1]);
     printf("Input file set\n");
     fflush(stdout);
@@ -134,7 +134,7 @@ int main(int argc, char *argv[]) {
         if (log) {
             fprintf(log, "解析失败！\n");
             if (!root_ast) {
-                fprintf(log, "错误: root_ast 为 NULL\n");
+                fprintf(log, "??: root_ast ? NULL\n");
             }
             fflush(log);
         }

@@ -1609,6 +1609,7 @@ ClassMemberDeclaration:
     | MethodDeclaration { $$ = $1; }
     | ClassDeclaration { $$ = $1; }
     | InterfaceDeclaration { $$ = $1; }
+    | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 FieldDeclaration:
@@ -2383,6 +2384,7 @@ InterfaceMemberDeclaration:
     | InterfaceMethodDeclaration { $$ = $1; }
     | ClassDeclaration { $$ = $1; }
     | InterfaceDeclaration { $$ = $1; }
+    | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
@@ -2460,6 +2462,7 @@ AnnotationTypeMemberDeclaration:
     | ConstantDeclaration { $$ = $1; }
     | ClassDeclaration { $$ = $1; }
     | InterfaceDeclaration { $$ = $1; }
+    | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
@@ -2697,6 +2700,9 @@ StatementWithoutTrailingSubstatement:
 
 EmptyStatement:
     EMPTY_STMT {
+        $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column);
+    }
+    | ';' {
         $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column);
     }
 ;
