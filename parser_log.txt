@@ -3,7 +3,7 @@
 输入文件: SyntaxTest.java
 已设置输入文件
 开始词法分析...
-词法分析完成，共找到 990 个 token
+词法分析完成，共找到 817 个 token
 Token 列表已打印
 
 开始语法分析和 AST 构建...
@@ -13,21 +13,27 @@ Token 列表已打印
 === AST 结构 ===
 CompilationUnit
   PackageDeclaration
-  ImportList
-    ImportDeclaration
+    Annotation
+    MemberAccess
       MemberAccess
         MemberAccess
-          Identifier('java')
-          Identifier('lang')
-        Identifier('annotation')
-      Identifier('*')
+          Identifier('com')
+          Identifier('example')
+        Identifier('parser')
+      Identifier('test')
+  ImportList
     ImportDeclaration
       MemberAccess
         Identifier('java')
         Identifier('util')
       Identifier('*')
+    ImportDeclaration
+      MemberAccess
+        MemberAccess
+          Identifier('java')
+          Identifier('io')
+        Identifier('Serializable')
   TypeDeclList
-    InterfaceDeclaration
     ClassDeclaration
       ModifierList
         Identifier('public')
@@ -37,88 +43,106 @@ CompilationUnit
           Identifier('T')
           ArgumentList
             Type
-              Identifier('Number')
+              Identifier('Serializable')
       ArgumentList
         Identifier('extends')
         Type
-          Identifier('ArrayList')
+          Identifier('BaseClass')
       ArgumentList
         Identifier('implements')
         ArgumentList
           Type
-            Identifier('Serializable')
-          Type
-            Identifier('Cloneable')
+            Identifier('TestInterface')
       Block
         FieldDeclaration
           ModifierList
-            Identifier('public')
+            Identifier('private')
             Identifier('static')
             Identifier('final')
           Identifier('int')
           StatementList
             VariableDeclaration
-              Identifier('CONSTANT')
+              Identifier('MAX_COUNT')
               Literal('100')
         FieldDeclaration
           ModifierList
-            Annotation
-              Identifier('TestAnnotation')
-            Identifier('protected')
-            Identifier('volatile')
+            Identifier('private')
             Identifier('transient')
           Identifier('String')
           StatementList
             VariableDeclaration
-              Identifier('field1')
+              Identifier('instanceVar')
+              Literal('default')
         FieldDeclaration
           ModifierList
-            Identifier('private')
-            Identifier('static')
-            Identifier('final')
-          Identifier('long')
-          StatementList
-            VariableDeclaration
-              Identifier('serialVersionUID')
-              Literal('1')
-        FieldDeclaration
-          ModifierList
-            Identifier('transient')
+            Identifier('protected')
             Identifier('volatile')
-          Identifier('int')
-          StatementList
-            VariableDeclaration
-              Identifier('arrayField')
-        FieldDeclaration
-          ModifierList
-            Annotation
-              Identifier('TestAnnotation')
-            Identifier('private')
-            Identifier('final')
           Identifier('List')
           StatementList
             VariableDeclaration
-              Identifier('list')
+              Identifier('genericList')
               ObjectCreation
                 Identifier('ArrayList')
                   Identifier('<>')
                 ArgumentList
-        Unknown('instance-init')
+        FieldDeclaration
+          ModifierList
+            Identifier('public')
+            Identifier('static')
+          Identifier('String')
+          StatementList
+            VariableDeclaration
+              Identifier('multiDimArray')
+              ObjectCreation
+                Type
+                  Identifier('String')
+                ArgumentList
+                  Dim
+                    Literal('2')
+                  Dim
+                    Literal('3')
+                  Dim
+                    Literal('4')
+        EnumDeclaration
+          Identifier('Status')
           Block
             StatementList
-              Assignment
-                Identifier('field1')
-                Identifier('=')
-                Literal('initialized')
-              Assignment
-                Identifier('arrayField')
-                Identifier('=')
-                ObjectCreation
-                  Identifier('int')
-                  ArgumentList
-                    Dim
-                      Literal('10')
-        Unknown('static-init')
+              EnumConstant
+                Identifier('ACTIVE')
+                ArgumentList
+                  Literal('1')
+              EnumConstant
+                Identifier('INACTIVE')
+                ArgumentList
+                  Literal('0')
+              EnumConstant
+                Identifier('PENDING')
+                ArgumentList
+                  Literal('2')
+            Block
+              FieldDeclaration
+                ModifierList
+                  Identifier('private')
+                Identifier('int')
+                StatementList
+                  VariableDeclaration
+                    Identifier('code')
+              ConstructorDeclaration
+                Identifier('Status')
+                ArgumentList
+                  Parameter
+                    Identifier('int')
+                    Identifier('code')
+                Block
+              MethodDeclaration
+                Identifier('int')
+                Identifier('getCode')
+                ArgumentList
+                Block
+                  StatementList
+                    ReturnStatement
+                      Identifier('code')
+        StaticInitializer
           Block
             StatementList
               MethodInvocation
@@ -127,7 +151,24 @@ CompilationUnit
                   Identifier('out')
                 Identifier('println')
                 ArgumentList
-                  Literal('Class initialized')
+                  Literal('Static initializer executed')
+              Assignment
+                ArrayAccess
+                  ArrayAccess
+                    ArrayAccess
+                      Identifier('multiDimArray')
+                      Literal('0')
+                    Literal('0')
+                  Literal('0')
+                Identifier('=')
+                Literal('test')
+        InstanceInitializer
+          Block
+            StatementList
+              Assignment
+                Identifier('instanceVar')
+                Identifier('=')
+                Literal('initialized')
         ConstructorDeclaration
           Identifier('SyntaxTest')
           ArgumentList
@@ -136,422 +177,148 @@ CompilationUnit
           Identifier('SyntaxTest')
           ArgumentList
             Parameter
-              Identifier('T')
-              Identifier('element')
+              Identifier('String')
+              Identifier('param')
           Block
         MethodDeclaration
-          Identifier('E')
-          Identifier('genericMethod')
+          Identifier('List')
+          Identifier('complexMethod')
           ArgumentList
             Parameter
-              Identifier('E')
-              Identifier('param')
-            Parameter
               Identifier('List')
-              Identifier('list')
+              Identifier('input')
           ArgumentList
             ExceptionTypeList
               Type
                 Identifier('IllegalArgumentException')
               Type
-                Identifier('NullPointerException')
+                Identifier('ArithmeticException')
           Block
             StatementList
-              MethodInvocation
-                Identifier('list')
-                Identifier('add')
-                ArgumentList
-                  Identifier('param')
-              ReturnStatement
-                Identifier('param')
-        MethodDeclaration
-          Identifier('void')
-          Identifier('varargsMethod')
-          ArgumentList
-            Parameter
-              Identifier('String')
-              Identifier('args')
-              Identifier('...')
-          Block
-            StatementList
-              ForEachStatement
-                Parameter
-                  Identifier('String')
-                  Identifier('arg')
-                Identifier('args')
-                Block
-                  StatementList
-                    MethodInvocation
-                      MemberAccess
-                        Identifier('System')
-                        Identifier('out')
-                      Identifier('println')
-                      ArgumentList
-                        Identifier('arg')
-        MethodDeclaration
-          Identifier('void')
-          Identifier('synchronizedMethod')
-          ArgumentList
-          Block
-        MethodDeclaration
-          Identifier('void')
-          Identifier('nativeMethod')
-          ArgumentList
-          Block
-        MethodDeclaration
-          Identifier('void')
-          Identifier('methodWithReceiver')
-          ArgumentList
-          Block
-            StatementList
-              MethodInvocation
-                MemberAccess
-                  Identifier('System')
-                  Identifier('out')
-                Identifier('println')
-                ArgumentList
-                  Literal('Receiver method')
-        ClassDeclaration
-          ModifierList
-            Identifier('private')
-          Identifier('InnerClass')
-          Block
-            FieldDeclaration
-              ModifierList
-                Identifier('private')
-              Identifier('int')
-              StatementList
-                VariableDeclaration
-                  Identifier('innerField')
-            ConstructorDeclaration
-              Identifier('InnerClass')
-              ArgumentList
-                Parameter
-                  Identifier('int')
-                  Identifier('value')
-              Block
-        ClassDeclaration
-          ModifierList
-            Identifier('public')
-            Identifier('static')
-          Identifier('NestedClass')
-          Block
-            MethodDeclaration
-              Identifier('void')
-              Identifier('nestedMethod')
-              ArgumentList
-              Block
-                StatementList
-                  MethodInvocation
-                    MemberAccess
-                      Identifier('System')
-                      Identifier('out')
-                    Identifier('println')
-                    ArgumentList
-                      Literal('Nested method')
-        Empty(';')
-    EnumDeclaration
-      Identifier('TestEnum')
-      ArgumentList
-        Identifier('implements')
-        ArgumentList
-          Type
-            Identifier('Serializable')
-      Block
-        StatementList
-          Unknown
-            Identifier('FIRST')
-            ArgumentList
-              Literal('1')
-            Block
-              MethodDeclaration
-                Identifier('void')
-                Identifier('customMethod')
-                ArgumentList
-                Block
-                  StatementList
-                    MethodInvocation
-                      MemberAccess
-                        Identifier('System')
-                        Identifier('out')
-                      Identifier('println')
-                      ArgumentList
-                        Literal('First constant')
-          Unknown
-            Annotation
-              Annotation
-                Identifier('TestAnnotation')
-            Identifier('SECOND')
-            ArgumentList
-              Literal('2')
-          Unknown
-            Identifier('THIRD')
-            ArgumentList
-              Literal('3')
-            Block
-              MethodDeclaration
-                Identifier('void')
-                Identifier('customMethod')
-                ArgumentList
-                Block
-                  StatementList
-                    MethodInvocation
-                      MemberAccess
-                        Identifier('System')
-                        Identifier('out')
-                      Identifier('println')
-                      ArgumentList
-                        Literal('Third constant')
-        Block
-          FieldDeclaration
-            ModifierList
-              Identifier('private')
-              Identifier('final')
-            Identifier('int')
-            StatementList
-              VariableDeclaration
-                Identifier('value')
-          ConstructorDeclaration
-            Identifier('TestEnum')
-            ArgumentList
-              Parameter
+              LocalVariableDeclaration
                 Identifier('int')
-                Identifier('value')
-            Block
-          MethodDeclaration
-            Identifier('int')
-            Identifier('getValue')
-            ArgumentList
-            Block
-              StatementList
-                ReturnStatement
-                  Identifier('value')
-          MethodDeclaration
-            Identifier('void')
-            Identifier('customMethod')
-            ArgumentList
-            Block
-              StatementList
-                MethodInvocation
-                  MemberAccess
-                    Identifier('System')
-                    Identifier('out')
-                  Identifier('println')
-                  ArgumentList
-                    Literal('Default implementation')
-          FieldDeclaration
-            ModifierList
-              Identifier('private')
-              Identifier('static')
-              Identifier('final')
-            Identifier('int')
-            StatementList
-              VariableDeclaration
-                Identifier('ENUM_CONSTANT')
-                Literal('100')
-          MethodDeclaration
-            Identifier('void')
-            Identifier('enumStaticMethod')
-            ArgumentList
-            Block
-              StatementList
-                MethodInvocation
-                  MemberAccess
-                    Identifier('System')
-                    Identifier('out')
-                  Identifier('println')
-                  ArgumentList
-                    Literal('Static method in enum')
-    InterfaceDeclaration
-      Identifier('TestInterface')
-      ArgumentList
-        TypeParameter
-          Identifier('T')
-      Block
-        FieldDeclaration
-          Identifier('String')
-          StatementList
-            VariableDeclaration
-              Identifier('INTERFACE_CONSTANT')
-              Literal('constant')
-        MethodDeclaration
-          Identifier('void')
-          Identifier('interfaceMethod')
-          ArgumentList
-            Parameter
-              Identifier('T')
-              Identifier('param')
-          Block
-        MethodDeclaration
-          Identifier('void')
-          Identifier('defaultMethod')
-          ArgumentList
-          Block
-            StatementList
-              MethodInvocation
-                MemberAccess
-                  Identifier('System')
-                  Identifier('out')
-                Identifier('println')
-                ArgumentList
-                  Literal('Default method')
-        MethodDeclaration
-          Identifier('void')
-          Identifier('staticInterfaceMethod')
-          ArgumentList
-          Block
-            StatementList
-              MethodInvocation
-                MemberAccess
-                  Identifier('System')
-                  Identifier('out')
-                Identifier('println')
-                ArgumentList
-                  Literal('Static interface method')
-    InterfaceDeclaration
-    ClassDeclaration
-      Identifier('TypeParameterTest')
-      ArgumentList
-        TypeParameter
-          Identifier('T')
-          ArgumentList
-            Type
-              Identifier('Number')
-            Type
-              Identifier('Serializable')
-        TypeParameter
-          Identifier('U')
-          ArgumentList
-            Type
-              Identifier('Comparable')
-            Type
-              Identifier('Cloneable')
-        TypeParameter
-          Identifier('V')
-          ArgumentList
-            Type
-              Identifier('List')
-            Type
-              Identifier('RandomAccess')
-      Block
-        MethodDeclaration
-          Identifier('void')
-          Identifier('wildcardTest')
-          ArgumentList
-            Parameter
-              Identifier('List')
-              Identifier('list1')
-            Parameter
-              Identifier('List')
-              Identifier('list2')
-          Block
-        MethodDeclaration
-          Identifier('S')
-          Identifier('complexTypeParameter')
-          ArgumentList
-            Parameter
-              Identifier('S')
-              Identifier('map')
-          Block
-            StatementList
-              ReturnStatement
-                Identifier('map')
-    ClassDeclaration
-      Identifier('ArrayTest')
-      Block
-        FieldDeclaration
-          ModifierList
-            Identifier('private')
-          Identifier('int')
-          StatementList
-            VariableDeclaration
-              Identifier('multiArray')
-        FieldDeclaration
-          ModifierList
-            Identifier('private')
-          Identifier('String')
-          StatementList
-            VariableDeclaration
-              Identifier('stringArray')
-        ConstructorDeclaration
-          Identifier('ArrayTest')
-          ArgumentList
-          Block
-        MethodDeclaration
-          Identifier('void')
-          Identifier('acceptArrays')
-          ArgumentList
-            Parameter
-              Identifier('int')
-              Identifier('intArray')
-            Parameter
-              Identifier('String')
-              Identifier('varargs')
-              Identifier('...')
-          Block
-            StatementList
-              MethodInvocation
-                MemberAccess
-                  Identifier('System')
-                  Identifier('out')
-                Identifier('println')
-                ArgumentList
-                  MethodInvocation
-                    Identifier('Arrays')
-                    Identifier('toString')
-                    ArgumentList
-                      Identifier('intArray')
-              MethodInvocation
-                MemberAccess
-                  Identifier('System')
-                  Identifier('out')
-                Identifier('println')
-                ArgumentList
-                  MethodInvocation
-                    Identifier('Arrays')
-                    Identifier('toString')
-                    ArgumentList
-                      Identifier('varargs')
-    ClassDeclaration
-      Identifier('ExceptionTest')
-      Block
-        MethodDeclaration
-          Identifier('void')
-          Identifier('testExceptions')
-          ArgumentList
-          ArgumentList
-            ExceptionTypeList
-              Type
-                Identifier('IOException')
-              Type
-                Identifier('RuntimeException')
-          Block
-            StatementList
+                StatementList
+                  VariableDeclaration
+                    Identifier('localVar')
+                    SwitchStatement
+                      MethodInvocation
+                        Identifier('input')
+                        Identifier('size')
+                        ArgumentList
+                      StatementList
+                        SwitchLabel
+                          SwitchLabel
+                            ArgumentList
+                              Literal('0')
+                          Literal('0')
+                        SwitchLabel
+                          SwitchLabel
+                            ArgumentList
+                              Literal('1')
+                          Literal('1')
+                        SwitchLabel
+                          Identifier('default')
+                          Block
+                            StatementList
+                              LocalVariableDeclaration
+                                Identifier('int')
+                                StatementList
+                                  VariableDeclaration
+                                    Identifier('result')
+                                    BinaryExpression
+                                      MethodInvocation
+                                        Identifier('input')
+                                        Identifier('size')
+                                        ArgumentList
+                                      Identifier('*')
+                                      Literal('2')
+                              YieldStatement
+                                Identifier('result')
               TryStatement
+                ResourceSpec
+                  ResourceList
+                    Resource
+                      Assignment
+                        Parameter
+                          Identifier('Scanner')
+                          Identifier('sc')
+                        ObjectCreation
+                          Identifier('Scanner')
+                          ArgumentList
+                            MemberAccess
+                              Identifier('System')
+                              Identifier('in')
                 Block
                   StatementList
-                    ThrowStatement
-                      ObjectCreation
-                        Identifier('IOException')
-                        ArgumentList
-                          Literal('Test exception')
+                    IfStatement
+                      BinaryExpression
+                        Identifier('localVar')
+                        Identifier('>')
+                        Identifier('MAX_COUNT')
+                      Block
+                        StatementList
+                          ThrowStatement
+                            ObjectCreation
+                              Identifier('IllegalArgumentException')
+                              ArgumentList
+                                Literal('Value too large')
+                    ForStatement
+                      LocalVariableDeclaration
+                        Identifier('int')
+                        StatementList
+                          VariableDeclaration
+                            Identifier('i')
+                            Literal('0')
+                      BinaryExpression
+                        Identifier('i')
+                        Identifier('<')
+                        Identifier('localVar')
+                      StatementList
+                        UnaryExpression
+                          Identifier('i')
+                          Identifier('++')
+                      Block
+                        StatementList
+                          WhileStatement
+                            BinaryExpression
+                              BinaryExpression
+                                Identifier('i')
+                                Identifier('%')
+                                Literal('3')
+                              Identifier('==')
+                              Literal('0')
+                            Block
+                              StatementList
+                                DoWhileStatement
+                                  Block
+                                    StatementList
+                                      MethodInvocation
+                                        MemberAccess
+                                          Identifier('System')
+                                          Identifier('out')
+                                        Identifier('println')
+                                        ArgumentList
+                                          BinaryExpression
+                                            Literal('Iteration: ')
+                                            Identifier('+')
+                                            Identifier('i')
+                                  Literal('false')
+                                BreakStatement
                 StatementList
                   CatchClause
                     Parameter
-                      Identifier('IOException')
-                        Type
-                          Identifier('SecurityException')
+                      Identifier('Exception')
                       Identifier('e')
                     Block
                       StatementList
                         MethodInvocation
                           MemberAccess
                             Identifier('System')
-                            Identifier('out')
+                            Identifier('err')
                           Identifier('println')
                           ArgumentList
                             BinaryExpression
-                              Literal('Caught exception: ')
+                              Literal('Error occurred: ')
                               Identifier('+')
                               MethodInvocation
                                 Identifier('e')
@@ -566,24 +333,92 @@ CompilationUnit
                           Identifier('out')
                         Identifier('println')
                         ArgumentList
-                          Literal('Finally block')
-    ClassDeclaration
-      Identifier('AnonymousTest')
-      Block
-        FieldDeclaration
-          ModifierList
-            Identifier('private')
-          Identifier('Runnable')
-          StatementList
-            VariableDeclaration
-              Identifier('anonymousField')
-              ObjectCreation
+                          Literal('Cleanup completed')
+              LocalVariableDeclaration
                 Identifier('Runnable')
+                StatementList
+                  VariableDeclaration
+                    Identifier('r')
+                    LambdaExpression
+                      ArgumentList
+                      MethodInvocation
+                        MemberAccess
+                          Identifier('System')
+                          Identifier('out')
+                        Identifier('println')
+                        ArgumentList
+                          Literal('Lambda executed')
+              MethodInvocation
+                ObjectCreation
+                  Identifier('Thread')
+                  ArgumentList
+                    Identifier('r')
+                Identifier('start')
                 ArgumentList
+              MethodInvocation
+                Identifier('genericList')
+                Identifier('forEach')
+                ArgumentList
+                  MemberAccess
+                    Type
+                      MemberAccess
+                        Identifier('System')
+                        Identifier('out')
+                    Identifier('println')
+              ReturnStatement
+                MethodInvocation
+                  Identifier('Collections')
+                  Identifier('emptyList')
+                  ArgumentList
+        ClassDeclaration
+          ModifierList
+            Identifier('static')
+          Identifier('NestedStaticClass')
+          Block
+            MethodDeclaration
+              Identifier('void')
+              Identifier('display')
+              ArgumentList
+              Block
+                StatementList
+                  MethodInvocation
+                    MemberAccess
+                      Identifier('System')
+                      Identifier('out')
+                    Identifier('println')
+                    ArgumentList
+                      Literal('Static nested class')
+        ClassDeclaration
+          Identifier('InnerClass')
+          Block
+            MethodDeclaration
+              Identifier('void')
+              Identifier('accessOuter')
+              ArgumentList
+              Block
+                StatementList
+                  MethodInvocation
+                    MemberAccess
+                      Identifier('System')
+                      Identifier('out')
+                    Identifier('println')
+                    ArgumentList
+                      BinaryExpression
+                        Literal('Accessing outer: ')
+                        Identifier('+')
+                        Identifier('instanceVar')
+        MethodDeclaration
+          Identifier('void')
+          Identifier('interfaceMethod')
+          ArgumentList
+          Block
+            StatementList
+              ClassDeclaration
+                Identifier('LocalClass')
                 Block
                   MethodDeclaration
                     Identifier('void')
-                    Identifier('run')
+                    Identifier('show')
                     ArgumentList
                     Block
                       StatementList
@@ -593,145 +428,278 @@ CompilationUnit
                             Identifier('out')
                           Identifier('println')
                           ArgumentList
-                            Literal('Anonymous class')
+                            Literal('Local class method')
+              MethodInvocation
+                ObjectCreation
+                  Identifier('LocalClass')
+                  ArgumentList
+                Identifier('show')
+                ArgumentList
         MethodDeclaration
           Identifier('void')
-          Identifier('testLambda')
+          Identifier('main')
           ArgumentList
+            Parameter
+              Identifier('String')
+              Identifier('args')
+              Identifier('...')
           Block
             StatementList
               LocalVariableDeclaration
-                Identifier('List')
+                Identifier('SyntaxTest')
+                StatementList
+                  VariableDeclaration
+                    Identifier('obj')
+                    ObjectCreation
+                      Identifier('SyntaxTest')
+                        Identifier('<>')
+                      ArgumentList
+                        Literal('testValue')
+              LocalVariableDeclaration
+                Identifier('var')
                 StatementList
                   VariableDeclaration
                     Identifier('list')
                     MethodInvocation
-                      Identifier('Arrays')
-                      Identifier('asList')
+                      Identifier('List')
+                      Identifier('of')
                       ArgumentList
-                        Literal('a')
-                        Literal('b')
-                        Literal('c')
-              MethodInvocation
-                Identifier('list')
-                Identifier('forEach')
-                ArgumentList
-                  LambdaExpression
-                    Identifier('s')
-                    MethodInvocation
-                      MemberAccess
-                        Identifier('System')
-                        Identifier('out')
-                      Identifier('println')
-                      ArgumentList
-                        Identifier('s')
+                        Literal('1')
+                        Literal('2.5')
+                        Literal('3f')
               LocalVariableDeclaration
-                Identifier('Thread')
+                Identifier('TestInterface')
                 StatementList
                   VariableDeclaration
-                    Identifier('thread')
+                    Identifier('anonymous')
                     ObjectCreation
-                      Identifier('Thread')
+                      Identifier('TestInterface')
                       ArgumentList
-                        LambdaExpression
+                      Block
+                        MethodDeclaration
+                          Identifier('void')
+                          Identifier('interfaceMethod')
                           ArgumentList
                           Block
                             StatementList
-                              ForStatement
-                                LocalVariableDeclaration
-                                  Identifier('int')
-                                  StatementList
-                                    VariableDeclaration
-                                      Identifier('i')
-                                      Literal('0')
-                                BinaryExpression
-                                  Identifier('i')
-                                  Identifier('<')
-                                  Literal('10')
-                                StatementList
-                                  UnaryExpression
-                                    Identifier('i')
-                                    Identifier('++')
-                                Block
-                                  StatementList
-                                    MethodInvocation
-                                      MemberAccess
-                                        Identifier('System')
-                                        Identifier('out')
-                                      Identifier('println')
-                                      ArgumentList
-                                        Identifier('i')
+                              MethodInvocation
+                                MemberAccess
+                                  Identifier('System')
+                                  Identifier('out')
+                                Identifier('println')
+                                ArgumentList
+                                  Literal('Anonymous class implementation')
+              MethodInvocation
+                Identifier('obj')
+                Identifier('complexMethod')
+                ArgumentList
+                  Identifier('list')
+              MethodInvocation
+                Identifier('anonymous')
+                Identifier('interfaceMethod')
+                ArgumentList
+              LocalVariableDeclaration
+                Identifier('NestedStaticClass')
+                StatementList
+                  VariableDeclaration
+                    Identifier('staticObj')
+                    ObjectCreation
+                      Identifier('NestedStaticClass')
+                      ArgumentList
+              LocalVariableDeclaration
+                Identifier('InnerClass')
+                StatementList
+                  VariableDeclaration
+                    Identifier('innerObj')
+                    ObjectCreation
+                      Identifier('obj')
+                      Identifier('InnerClass')
+                      ArgumentList
+              MethodInvocation
+                Identifier('staticObj')
+                Identifier('display')
+                ArgumentList
+              MethodInvocation
+                Identifier('innerObj')
+                Identifier('accessOuter')
+                ArgumentList
+              AssertStatement
+                MethodInvocation
+                  MemberAccess
+                    Identifier('obj')
+                    Identifier('instanceVar')
+                  Identifier('equals')
+                  ArgumentList
+                    Literal('testValue')
+                Literal('Assertion failed')
     ClassDeclaration
-      ModifierList
-        Identifier('strictfp')
-      Identifier('StrictFPTest')
+      Identifier('BaseClass')
+      Block
+        FieldDeclaration
+          ModifierList
+            Identifier('protected')
+          Identifier('String')
+          StatementList
+            VariableDeclaration
+              Identifier('baseField')
+              Literal('base')
+    InterfaceDeclaration
+      Identifier('TestInterface')
       Block
         MethodDeclaration
-          Identifier('double')
-          Identifier('calculate')
+          Identifier('void')
+          Identifier('interfaceMethod')
           ArgumentList
-            Parameter
-              Identifier('double')
-              Identifier('a')
-            Parameter
-              Identifier('double')
-              Identifier('b')
+          Block
+        MethodDeclaration
+          Identifier('void')
+          Identifier('defaultMethod')
+          ArgumentList
           Block
             StatementList
-              ReturnStatement
-                BinaryExpression
-                  Identifier('a')
-                  Identifier('*')
-                  Identifier('b')
+              MethodInvocation
+                MemberAccess
+                  Identifier('System')
+                  Identifier('out')
+                Identifier('println')
+                ArgumentList
+                  Literal('Interface default method')
     ClassDeclaration
-      Identifier('GenericConstructor')
-      Block
-        ConstructorDeclaration
-          Identifier('GenericConstructor')
-          ArgumentList
-            Parameter
-              Identifier('T')
-              Identifier('parameter')
-          Block
-    ClassDeclaration
-      Identifier('ExplicitConstructorCall')
+      Identifier('Point')
       Block
         FieldDeclaration
           ModifierList
             Identifier('private')
+            Identifier('final')
           Identifier('int')
           StatementList
             VariableDeclaration
-              Identifier('value')
+              Identifier('x')
+        FieldDeclaration
+          ModifierList
+            Identifier('private')
+            Identifier('final')
+          Identifier('int')
+          StatementList
+            VariableDeclaration
+              Identifier('y')
         ConstructorDeclaration
-          Identifier('ExplicitConstructorCall')
-          ArgumentList
-          Block
-        ConstructorDeclaration
-          Identifier('ExplicitConstructorCall')
-          ArgumentList
-            Parameter
-              Identifier('int')
-              Identifier('value')
-          Block
-    ClassDeclaration
-      Identifier('ChildClass')
-      ArgumentList
-        Identifier('extends')
-        Type
-          Identifier('ExplicitConstructorCall')
-      Block
-        ConstructorDeclaration
-          Identifier('ChildClass')
-          ArgumentList
-          Block
-        ConstructorDeclaration
-          Identifier('ChildClass')
+          Identifier('Point')
           ArgumentList
             Parameter
               Identifier('int')
-              Identifier('value')
+              Identifier('x')
+            Parameter
+              Identifier('int')
+              Identifier('y')
           Block
+        MethodDeclaration
+          Identifier('int')
+          Identifier('x')
+          ArgumentList
+          Block
+            StatementList
+              ReturnStatement
+                Identifier('x')
+        MethodDeclaration
+          Identifier('int')
+          Identifier('y')
+          ArgumentList
+          Block
+            StatementList
+              ReturnStatement
+                Identifier('y')
+        MethodDeclaration
+          Identifier('String')
+          Identifier('toString')
+          ArgumentList
+          Block
+            StatementList
+              ReturnStatement
+                BinaryExpression
+                  BinaryExpression
+                    BinaryExpression
+                      BinaryExpression
+                        Literal('Point[')
+                        Identifier('+')
+                        Identifier('x')
+                      Identifier('+')
+                      Literal(', ')
+                    Identifier('+')
+                    Identifier('y')
+                  Identifier('+')
+                  Literal(']')
+        MethodDeclaration
+          Identifier('boolean')
+          Identifier('equals')
+          ArgumentList
+            Parameter
+              Identifier('Object')
+              Identifier('o')
+          Block
+            StatementList
+              IfStatement
+                BinaryExpression
+                  Identifier('this')
+                  Identifier('==')
+                  Identifier('o')
+                ReturnStatement
+                  Literal('true')
+              IfStatement
+                BinaryExpression
+                  BinaryExpression
+                    Identifier('o')
+                    Identifier('==')
+                    Literal('null')
+                  Identifier('||')
+                  BinaryExpression
+                    MethodInvocation
+                      Identifier('getClass')
+                      ArgumentList
+                    Identifier('!=')
+                    MethodInvocation
+                      Identifier('o')
+                      Identifier('getClass')
+                      ArgumentList
+                ReturnStatement
+                  Literal('false')
+              LocalVariableDeclaration
+                Identifier('Point')
+                StatementList
+                  VariableDeclaration
+                    Identifier('point')
+                    Expression
+                      Type
+                        Identifier('Point')
+                      Identifier('o')
+              ReturnStatement
+                BinaryExpression
+                  BinaryExpression
+                    Identifier('x')
+                    Identifier('==')
+                    MemberAccess
+                      Identifier('point')
+                      Identifier('x')
+                  Identifier('&&')
+                  BinaryExpression
+                    Identifier('y')
+                    Identifier('==')
+                    MemberAccess
+                      Identifier('point')
+                      Identifier('y')
+        MethodDeclaration
+          Identifier('int')
+          Identifier('hashCode')
+          ArgumentList
+          Block
+            StatementList
+              ReturnStatement
+                MethodInvocation
+                  Identifier('Objects')
+                  Identifier('hash')
+                  ArgumentList
+                    Identifier('x')
+                    Identifier('y')
 
 === AST 结构结束 ===
 AST 已释放

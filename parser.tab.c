@@ -120,6 +120,12 @@ static AstNode *make_import_node(bool is_static, bool on_demand, AstNode *target
     return node;
 }
 
+static AstNode *make_default_package_node(YYLTYPE loc) {
+    AstNode *node = AST_EMPTY_NODE(AST_PACKAGE_DECL, loc);
+    ast_set_text(node, "<default>");
+    return node;
+}
+
 static AstNode *make_module_decl_node(AstNode *name, AstNode *directives,
                                       bool is_open, YYLTYPE module_loc,
                                       const YYLTYPE *open_loc) {
@@ -499,7 +505,7 @@ static AstNode *make_throws_node(AstNode *types, YYLTYPE loc) {
 
 static AstNode *make_enum_constant(AstNode *annotations, AstNode *name,
                                    AstNode *args, AstNode *class_body, YYLTYPE loc) {
-    AstNode *node = ast_branch(AST_UNKNOWN, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    AstNode *node = ast_branch(AST_ENUM_CONST, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (annotations) {
         ast_add_child(node, annotations);
     }
@@ -6038,7 +6044,9 @@ yyreduce:
   case 40: /* NormalAnnotation_Modifier: AT_Modifier TypeName_ModifierOrDims '(' ElementValuePairList ')'  */
 #line 834 "parser.y"
                                                                      {
-        (yyval.node) = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        AstNode *node = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        ast_add_child(node, (yyvsp[-1].node));
+        (yyval.node) = node;
     }
 #line 6044 "parser.tab.c"
     break;
@@ -6062,7 +6070,11 @@ yyreduce:
   case 43: /* SingleElementAnnotation_Modifier: AT_Modifier TypeName_ModifierOrDims '(' ElementValue ')'  */
 #line 849 "parser.y"
                                                              {
-        (yyval.node) = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        AstNode *node = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        AstNode *args = make_list_node(AST_ARGUMENT_LIST, (yyloc));
+        ast_add_child(args, (yyvsp[-1].node));
+        ast_add_child(node, args);
+        (yyval.node) = node;
     }
 #line 6068 "parser.tab.c"
     break;
@@ -6292,7 +6304,9 @@ yyreduce:
   case 72: /* NormalAnnotation_Dims: AT_Dims TypeName_ModifierOrDims '(' ElementValuePairList ')'  */
 #line 997 "parser.y"
                                                                  {
-        (yyval.node) = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        AstNode *node = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        ast_add_child(node, (yyvsp[-1].node));
+        (yyval.node) = node;
     }
 #line 6298 "parser.tab.c"
     break;
@@ -6316,7 +6330,11 @@ yyreduce:
   case 75: /* SingleElementAnnotation_Dims: AT_Dims TypeName_ModifierOrDims '(' ElementValue ')'  */
 #line 1012 "parser.y"
                                                          {
-        (yyval.node) = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        AstNode *node = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
+        AstNode *args = make_list_node(AST_ARGUMENT_LIST, (yyloc));
+        ast_add_child(args, (yyvsp[-1].node));
+        ast_add_child(node, args);
+        (yyval.node) = node;
     }
 #line 6322 "parser.tab.c"
     break;
@@ -6659,7 +6677,7 @@ yyreduce:
   case 113: /* OrdinaryCompilationUnit: ImportDeclarations TypeDeclarations  */
 #line 1245 "parser.y"
                                         {
-        AstNode *empty_pkg = AST_EMPTY_NODE(AST_PACKAGE_DECL, (yyloc));
+        AstNode *empty_pkg = make_default_package_node((yyloc));
         (yyval.node) = AST_BRANCH_AT(AST_COMPILATION_UNIT, (yyloc), 3, empty_pkg, (yyvsp[-1].node), (yyvsp[0].node));
     }
 #line 6666 "parser.tab.c"
@@ -6677,7 +6695,7 @@ yyreduce:
   case 115: /* OrdinaryCompilationUnit: TypeDeclarations  */
 #line 1253 "parser.y"
                      {
-        AstNode *empty_pkg = AST_EMPTY_NODE(AST_PACKAGE_DECL, (yyloc));
+        AstNode *empty_pkg = make_default_package_node((yyloc));
         AstNode *empty_imports = AST_EMPTY_NODE(AST_IMPORT_LIST, (yyloc));
         (yyval.node) = AST_BRANCH_AT(AST_COMPILATION_UNIT, (yyloc), 3, empty_pkg, empty_imports, (yyvsp[0].node));
     }
@@ -8590,7 +8608,7 @@ yyreduce:
   case 348: /* InterfaceDeclaration: AnnotationTypeDeclaration  */
 #line 2328 "parser.y"
                                 {
-        (yyval.node) = AST_EMPTY_NODE(AST_INTERFACE_DECL, (yylsp[0]));
+        (yyval.node) = (yyvsp[0].node);
     }
 #line 8596 "parser.tab.c"
     break;
@@ -9095,7 +9113,9 @@ yyreduce:
 #line 2599 "parser.y"
                                                      {
         AstNode *node = make_annotation_node((yyvsp[-3].node), (yylsp[-4]));
-        ast_add_child(node, (yyvsp[-1].node));
+        AstNode *args = make_list_node(AST_ARGUMENT_LIST, (yyloc));
+        ast_add_child(args, (yyvsp[-1].node));
+        ast_add_child(node, args);
         (yyval.node) = node;
     }
 #line 9102 "parser.tab.c"
@@ -12602,11 +12622,22 @@ static AstNode *make_class_basic(int line, int column,
 }
 
 static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE loc) {
-    AstNode *n = AST_BRANCH_AT(AST_UNKNOWN, loc, 0);
-    ast_set_text(n, label);          // 你前面已经用过 ast_set_text
+    AstKind kind = AST_UNKNOWN;
+    if (label) {
+        if (strcmp(label, "static-init") == 0) {
+            kind = AST_STATIC_INIT;
+        } else if (strcmp(label, "instance-init") == 0) {
+            kind = AST_INSTANCE_INIT;
+        }
+    }
+    AstNode *n = AST_BRANCH_AT(kind, loc, 0);
+    if (kind == AST_UNKNOWN && label) {
+        ast_set_text(n, label);
+    }
     if (block) ast_add_child(n, block);
     return n;
 }
+
 
 
 static AstNode *make_interface_basic(int line, int column, 

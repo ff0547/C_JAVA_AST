@@ -1,264 +1,167 @@
-// SyntaxTest.java
-import java.lang.annotation.*;
+// 文件: SyntaxTest.java
+package com.example.parser.test;
+
 import java.util.*;
+import java.io.Serializable;
 
-// 测试注解定义
-@Retention(RetentionPolicy.RUNTIME)
-@Target({ElementType.TYPE, ElementType.FIELD, ElementType.METHOD, ElementType.PARAMETER})
-@interface TestAnnotation {
-    String value() default "test";
-}
+public class SyntaxTest<T extends Serializable> extends BaseClass implements TestInterface {
 
-// 1. 普通类声明
-public class SyntaxTest<T extends Number> extends ArrayList<T> implements Serializable, Cloneable {
-    
-    // 字段声明测试
-    // 各种修饰符组合
-    public static final int CONSTANT = 100;
-    @TestAnnotation protected volatile transient String field1;
-    private static final long serialVersionUID = 1L;
-    transient volatile int[] arrayField;
-    @TestAnnotation("custom") private final List<String> list = new ArrayList<>();
-    
-    // 实例初始化块
-    {
-        field1 = "initialized";
-        arrayField = new int[10];
+    private static final int MAX_COUNT = 100;
+    private transient String instanceVar = "default";
+    protected volatile List<T> genericList = new ArrayList<>();
+    public static String[][][] multiDimArray = new String[2][3][4];
+
+    enum Status {
+        ACTIVE(1), INACTIVE(0), PENDING(2),;
+
+        private int code;
+        Status(int code) { this.code = code; }
+        public int getCode() { return code; }
     }
-    
-    // 静态初始化块
+
     static {
-        System.out.println("Class initialized");
+        System.out.println("Static initializer executed");
+        multiDimArray[0][0][0] = "test";
     }
-    
-    // 构造函数测试
-    public SyntaxTest() {
-        super();
-    }
-    
-    @TestAnnotation
-    protected SyntaxTest(T element) {
-        this.add(element);
-    }
-    
-    // 方法声明测试
-    public <E extends Comparable<E>> E genericMethod(E param, List<? super E> list) throws IllegalArgumentException, NullPointerException {
-        list.add(param);
-        return param;
-    }
-    
-    // 可变参数方法
-    public static final void varargsMethod(String... args) {
-        for (String arg : args) {
-            System.out.println(arg);
-        }
-    }
-    
-    // 同步方法
-    public synchronized void synchronizedMethod() {
-        // 方法体
-    }
-    
-    // 本地方法
-    public native void nativeMethod();
-    
-    // 抽象方法（需要在抽象类中）
-    // abstract void abstractMethod();
-    
-    // 接收器参数测试
-    public void methodWithReceiver(@TestAnnotation SyntaxTest this) {
-        System.out.println("Receiver method");
-    }
-    
-    // 内部类测试
-    private class InnerClass {
-        private int innerField;
-        
-        public InnerClass(int value) {
-            this.innerField = value;
-        }
-    }
-    
-    // 静态嵌套类
-    public static class NestedClass {
-        public void nestedMethod() {
-            System.out.println("Nested method");
-        }
-    }
-    
-    // 空声明测试
-    ;
-}
 
-// 2. 枚举声明
-enum TestEnum implements Serializable {
-    
-    // 枚举常量测试
-    FIRST(1) {
-        @Override
-        public void customMethod() {
-            System.out.println("First constant");
-        }
-    },
-    @TestAnnotation SECOND(2),
-    THIRD(3) {
-        public void customMethod() {
-            System.out.println("Third constant");
-        }
-    };
-    
-    // 枚举字段
-    private final int value;
-    
-    // 枚举构造函数
-    private TestEnum(int value) {
-        this.value = value;
+    {
+        instanceVar = "initialized";
     }
-    
-    // 枚举方法
-    public int getValue() {
-        return value;
-    }
-    
-    public void customMethod() {
-        System.out.println("Default implementation");
-    }
-    
-    // 枚举体声明
-    private static final int ENUM_CONSTANT = 100;
-    
-    public static void enumStaticMethod() {
-        System.out.println("Static method in enum");
-    }
-}
 
-// 3. 接口声明测试
-interface TestInterface<T> {
-    // 接口常量
-    String INTERFACE_CONSTANT = "constant";
-    
-    // 接口方法
-    void interfaceMethod(T param);
-    
-    // 默认方法
-    default void defaultMethod() {
-        System.out.println("Default method");
-    }
-    
-    // 静态方法
-    static void staticInterfaceMethod() {
-        System.out.println("Static interface method");
-    }
-}
+    public SyntaxTest() {}
 
-// 4. 注解声明测试
-@interface CustomAnnotation {
-    String value();
-    int number() default 42;
-    Class<?> type() default Object.class;
-}
+    @SuppressWarnings("unchecked")
+    public SyntaxTest(String param) {
+        this.instanceVar = param;
+    }
 
-// 5. 复杂类型参数测试
-class TypeParameterTest<
-    T extends Number & Serializable,
-    U extends Comparable<U> & Cloneable,
-    V extends List<T> & RandomAccess> {
-    
-    // 通配符测试
-    public void wildcardTest(List<? extends Number> list1, List<? super Integer> list2) {
-        // 方法体
-    }
-    
-    // 嵌套类型参数
-    public <S extends Map<U, V>> S complexTypeParameter(S map) {
-        return map;
-    }
-}
+    public synchronized List<T> complexMethod(List<? super Number> input)
+            throws IllegalArgumentException, ArithmeticException {
 
-// 6. 数组类型测试
-class ArrayTest {
-    private int[][][] multiArray;
-    private String[] stringArray;
-    
-    public ArrayTest() {
-        multiArray = new int[10][][];
-        stringArray = new String[]{"one", "two", "three"};
-    }
-    
-    // 可变参数与数组
-    public void acceptArrays(int[] intArray, String... varargs) {
-        System.out.println(Arrays.toString(intArray));
-        System.out.println(Arrays.toString(varargs));
-    }
-}
-
-// 7. 异常处理测试
-class ExceptionTest {
-    public void testExceptions() throws IOException, RuntimeException {
-        try {
-            throw new IOException("Test exception");
-        } catch (IOException | SecurityException e) {
-            System.out.println("Caught exception: " + e.getMessage());
-        } finally {
-            System.out.println("Finally block");
-        }
-    }
-}
-
-// 8. 匿名类和lambda测试
-class AnonymousTest {
-    private Runnable anonymousField = new Runnable() {
-        @Override
-        public void run() {
-            System.out.println("Anonymous class");
-        }
-    };
-    
-    public void testLambda() {
-        List<String> list = Arrays.asList("a", "b", "c");
-        list.forEach(s -> System.out.println(s));
-        
-        Thread thread = new Thread(() -> {
-            for (int i = 0; i < 10; i++) {
-                System.out.println(i);
+        int localVar = switch(input.size()) {
+            case 0 -> 0;
+            case 1 -> 1;
+            default -> {
+                int result = input.size() * 2;
+                yield result;
             }
-        });
+        };
+
+        try (Scanner sc = new Scanner(System.in)) {
+            if (localVar > MAX_COUNT) {
+                throw new IllegalArgumentException("Value too large");
+            }
+
+            for (int i = 0; i < localVar; i++) {
+                while (i % 3 == 0) {
+                    do {
+                        System.out.println("Iteration: " + i);
+                    } while (false);
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error occurred: " + e.getMessage());
+        } finally {
+            System.out.println("Cleanup completed");
+        }
+
+        Runnable r = () -> System.out.println("Lambda executed");
+        new Thread(r).start();
+
+        genericList.forEach(System.out::println);
+
+        return Collections.emptyList();
+    }
+
+    static class NestedStaticClass {
+        void display() {
+            System.out.println("Static nested class");
+        }
+    }
+
+    class InnerClass {
+        void accessOuter() {
+            System.out.println("Accessing outer: " + instanceVar);
+        }
+    }
+
+    @Override
+    public void interfaceMethod() {
+        class LocalClass {
+            void show() {
+                System.out.println("Local class method");
+            }
+        }
+        new LocalClass().show();
+    }
+
+    public static void main(String... args) {
+        SyntaxTest<String> obj = new SyntaxTest<>("testValue");
+        var list = List.of(1, 2.5, 3f);
+
+        TestInterface anonymous = new TestInterface() {
+            @Override
+            public void interfaceMethod() {
+                System.out.println("Anonymous class implementation");
+            }
+        };
+
+        obj.complexMethod(list);
+        anonymous.interfaceMethod();
+
+        NestedStaticClass staticObj = new NestedStaticClass();
+        InnerClass innerObj = obj.new InnerClass();
+
+        staticObj.display();
+        innerObj.accessOuter();
+
+        assert obj.instanceVar.equals("testValue") : "Assertion failed";
     }
 }
 
-// 9. 严格浮点测试
-strictfp class StrictFPTest {
-    public strictfp double calculate(double a, double b) {
-        return a * b;
+class BaseClass {
+    protected String baseField = "base";
+}
+
+interface TestInterface {
+    void interfaceMethod();
+
+    default void defaultMethod() {
+        System.out.println("Interface default method");
     }
 }
 
-// 10. 泛型构造函数测试
-class GenericConstructor {
-    public <T> GenericConstructor(T parameter) {
-        System.out.println("Generic constructor with: " + parameter);
-    }
-}
+// 替代记录类的传统类
+class Point {
+    private final int x;
+    private final int y;
 
-// 11. 显式构造函数调用测试
-class ExplicitConstructorCall {
-    private int value;
-    
-    public ExplicitConstructorCall() {
-        this(42); // 调用另一个构造函数
+    public Point(int x, int y) {
+        if (x < 0 || y < 0)
+            throw new IllegalArgumentException("Negative values not allowed");
+        this.x = x;
+        this.y = y;
     }
-    
-    public ExplicitConstructorCall(int value) {
-        this.value = value;
-    }
-}
 
-class ChildClass extends ExplicitConstructorCall {
-    public ChildClass() {
-        super(); // 显式调用父类构造函数
+    public int x() { return x; }
+    public int y() { return y; }
+
+    @Override
+    public String toString() {
+        return "Point[" + x + ", " + y + "]";
     }
-    
-    public ChildClass(int value) {
-        super(value);
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Point point = (Point) o;
+        return x == point.x && y == point.y;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(x, y);
     }
 }
