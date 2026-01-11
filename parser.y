@@ -51,6 +51,12 @@ static AstNode *make_import_node(bool is_static, bool on_demand, AstNode *target
     return node;
 }
 
+static AstNode *make_default_package_node(YYLTYPE loc) {
+    AstNode *node = AST_EMPTY_NODE(AST_PACKAGE_DECL, loc);
+    ast_set_text(node, "<default>");
+    return node;
+}
+
 static AstNode *make_module_decl_node(AstNode *name, AstNode *directives,
                                       bool is_open, YYLTYPE module_loc,
                                       const YYLTYPE *open_loc) {
@@ -430,7 +436,7 @@ static AstNode *make_throws_node(AstNode *types, YYLTYPE loc) {
 
 static AstNode *make_enum_constant(AstNode *annotations, AstNode *name,
                                    AstNode *args, AstNode *class_body, YYLTYPE loc) {
-    AstNode *node = ast_branch(AST_UNKNOWN, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    AstNode *node = ast_branch(AST_ENUM_CONST, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (annotations) {
         ast_add_child(node, annotations);
     }
@@ -545,18 +551,6 @@ static AstNode *make_cast_expr              (AstNode *type, AstNode *expr, YYLTY
 static AstNode *make_list_node(AstKind kind, YYLTYPE loc);
 static AstNode *make_keyword_leaf           (const char *kw, YYLTYPE loc);
 static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE loc);
-
-AstNode *root_ast = NULL;
-void yyerror(const char *s); // 确保yyerror被正确声明
-
-extern FILE *yyin;
-extern int yylex(void);      // 确保yylex被正确声明
-extern int init_token_list(void);
-
-%}
-%code requires {
-    typedef struct AstNode AstNode;
-}
 %union {
     char* str;
     int val;
@@ -832,7 +826,9 @@ Annotation_Modifier:
 
 NormalAnnotation_Modifier:
     AT_Modifier TypeName_ModifierOrDims '(' ElementValuePairList ')' {
-        $$ = make_annotation_node($2, @1);
+        AstNode *node = make_annotation_node($2, @1);
+        ast_add_child(node, $4);
+        $$ = node;
     }
     | AT_Modifier TypeName_ModifierOrDims '(' ')' {
         $$ = make_annotation_node($2, @1);
@@ -847,7 +843,11 @@ MarkerAnnotation_Modifier:
 
 SingleElementAnnotation_Modifier:
     AT_Modifier TypeName_ModifierOrDims '(' ElementValue ')' {
-        $$ = make_annotation_node($2, @1);
+        AstNode *node = make_annotation_node($2, @1);
+        AstNode *args = make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_add_child(args, $4);
+        ast_add_child(node, args);
+        $$ = node;
     }
 ;
 
@@ -995,7 +995,9 @@ Annotations_Dims:
 
 NormalAnnotation_Dims:
     AT_Dims TypeName_ModifierOrDims '(' ElementValuePairList ')' {
-        $$ = make_annotation_node($2, @1);
+        AstNode *node = make_annotation_node($2, @1);
+        ast_add_child(node, $4);
+        $$ = node;
     }
     | AT_Dims TypeName_ModifierOrDims '(' ')' {
         $$ = make_annotation_node($2, @1);
@@ -1010,7 +1012,11 @@ MarkerAnnotation_Dims:
 
 SingleElementAnnotation_Dims:
     AT_Dims TypeName_ModifierOrDims '(' ElementValue ')' {
-        $$ = make_annotation_node($2, @1);
+        AstNode *node = make_annotation_node($2, @1);
+        AstNode *args = make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_add_child(args, $4);
+        ast_add_child(node, args);
+        $$ = node;
     }
 ;
 
@@ -1243,7 +1249,7 @@ OrdinaryCompilationUnit:
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, $1, $2, $3);
     }
   | ImportDeclarations TypeDeclarations {
-        AstNode *empty_pkg = AST_EMPTY_NODE(AST_PACKAGE_DECL, @$);
+        AstNode *empty_pkg = make_default_package_node(@$);
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, empty_pkg, $1, $2);
     }
   | PackageDeclaration TypeDeclarations {
@@ -1251,7 +1257,7 @@ OrdinaryCompilationUnit:
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, $1, empty_imports, $2);
     }
   | TypeDeclarations {
-        AstNode *empty_pkg = AST_EMPTY_NODE(AST_PACKAGE_DECL, @$);
+        AstNode *empty_pkg = make_default_package_node(@$);
         AstNode *empty_imports = AST_EMPTY_NODE(AST_IMPORT_LIST, @$);
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, empty_pkg, empty_imports, $1);
     }
@@ -1347,6 +1353,7 @@ TypeDeclaration:
     ClassDeclaration { $$ = $1; }
     | InterfaceDeclaration { $$ = $1; }
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
+    | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
 // 模块声明
@@ -2326,7 +2333,7 @@ EnumBodyDeclarations:
 InterfaceDeclaration:
     NormalInterfaceDeclaration { $$ = $1; }
     | AnnotationTypeDeclaration {
-        $$ = AST_EMPTY_NODE(AST_INTERFACE_DECL, @1);
+        $$ = $1;
     }
 ;
 
@@ -2598,7 +2605,9 @@ MarkerAnnotation:
 SingleElementAnnotation:
     '@' TypeName_ModifierOrDims '(' ElementValue ')' {
         AstNode *node = make_annotation_node($2, @1);
-        ast_add_child(node, $4);
+        AstNode *args = make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_add_child(args, $4);
+        ast_add_child(node, args);
         $$ = node;
     }
 ;
@@ -4374,11 +4383,22 @@ static AstNode *make_class_basic(int line, int column,
 }
 
 static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE loc) {
-    AstNode *n = AST_BRANCH_AT(AST_UNKNOWN, loc, 0);
-    ast_set_text(n, label);          // 你前面已经用过 ast_set_text
+    AstKind kind = AST_UNKNOWN;
+    if (label) {
+        if (strcmp(label, "static-init") == 0) {
+            kind = AST_STATIC_INIT;
+        } else if (strcmp(label, "instance-init") == 0) {
+            kind = AST_INSTANCE_INIT;
+        }
+    }
+    AstNode *n = AST_BRANCH_AT(kind, loc, 0);
+    if (kind == AST_UNKNOWN && label) {
+        ast_set_text(n, label);
+    }
     if (block) ast_add_child(n, block);
     return n;
 }
+
 
 
 static AstNode *make_interface_basic(int line, int column, 
