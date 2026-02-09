@@ -45,9 +45,9 @@
 extern int yydebug;
 #endif
 /* "%code requires" blocks.  */
-#line 557 "parser.y"
+#line 914 "parser.y"
 
-    typedef struct AstNode AstNode;
+#include "java_ast.h"
 
 #line 53 "parser.tab.h"
 
@@ -219,7 +219,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 560 "parser.y"
+#line 918 "parser.y"
 
     char* str;
     int val;

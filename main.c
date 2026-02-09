@@ -7,7 +7,7 @@
 extern int yyparse(void);
 extern AstNode *root_ast;
 
-// 定义 yyerror 函数
+// 语法错误回调：输出错误位置与信息。
 // void yyerror(const char *s) {
 //     fprintf(stderr, "Parse error: %s\n", s);
 // }
@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
         fflush(log);
     }
 
-    // ???????
+    // 设置输入文件供词法/语法分析读取。
     set_input_file(argv[1]);
     printf("Input file set\n");
     fflush(stdout);
@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // 语法分析和AST构造
+    // 语法分析与 AST 构建。
     printf("\nStarting syntax analysis and AST construction...\n");
     fflush(stdout);
     if (log) {
@@ -121,7 +121,7 @@ int main(int argc, char *argv[]) {
         
         ast_print(root_ast, stdout, 0);
 
-        // 清理AST
+        // 清理 AST。
         ast_free(root_ast);
         root_ast = NULL;
         
@@ -134,13 +134,13 @@ int main(int argc, char *argv[]) {
         if (log) {
             fprintf(log, "解析失败！\n");
             if (!root_ast) {
-                fprintf(log, "??: root_ast ? NULL\n");
+                fprintf(log, "警告: root_ast 为 NULL\n");
             }
             fflush(log);
         }
     }
 
-    // 清理资源
+    // 清理资源。
     freeTokens();
     printf("Program finished\n");
     
