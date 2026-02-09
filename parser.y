@@ -4,10 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <ctype.h>           // 添加这个头文件以支持 isspace、isalpha 和 isalnum
-#include "parser.tab.h"
+#include <ctype.h>           // 添加这个头文件以支持 isspace、isalpha、isalnum
 #include "java_ast.h"
+#include "parser.tab.h"
 
+int yylex(void);
+void yyerror(const char *s);
+
+AstNode *root_ast = NULL;
 #define AST_LOC_LINE(loc) ((loc).first_line)
 #define AST_LOC_COL(loc) ((loc).first_column)
 
@@ -18,6 +22,8 @@
     ast_branch((kind), AST_LOC_LINE(loc), AST_LOC_COL(loc), 0)
 
 
+/* 语法动作使用的 AST 构建辅助函数。 */
+// 将子节点插入父节点子列表的最前面。
 static void ast_prepend_child(AstNode *parent, AstNode *child) {
     if (!parent || !child) {
         return;
@@ -29,18 +35,50 @@ static void ast_prepend_child(AstNode *parent, AstNode *child) {
     parent->child_count++;
 }
 
+// 用关键字文本生成标识符叶子节点。
 static AstNode *make_keyword_leaf(const char *text, YYLTYPE loc) {
     return ast_leaf(AST_IDENTIFIER, text, AST_LOC_LINE(loc), AST_LOC_COL(loc));
 }
 
+// 生成 this 表达式节点（可带限定名）。
+static AstNode *make_this_expr_node(AstNode *qualifier, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_THIS_EXPR, loc, 0);
+    if (qualifier) {
+        ast_add_child(node, qualifier);
+    }
+    return node;
+}
+
+// 生成指定种类的空列表节点。
 static AstNode *make_list_node(AstKind kind, YYLTYPE loc) {
     return ast_branch(kind, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
 }
 
+// 重新标记列表节点的类型。
+static AstNode *relabel_list(AstNode *node, AstKind kind) {
+    if (node) {
+        node->kind = kind;
+    }
+    return node;
+}
+
+// 将注解列表包装为修饰符列表节点。
+static AstNode *make_modifiers_from_annotations(AstNode *annotations, YYLTYPE loc) {
+    if (!annotations) {
+        return NULL;
+    }
+    AstNode *mods = make_list_node(AST_MODIFIER_LIST, loc);
+    ast_add_child(mods, annotations);
+    return mods;
+}
+
+// 构造 import 声明节点（static/按需）。
 static AstNode *make_import_node(bool is_static, bool on_demand, AstNode *target, YYLTYPE loc) {
     AstNode *node = ast_branch(AST_IMPORT_DECL, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (is_static) {
-        ast_add_child(node, make_keyword_leaf("static", loc));
+        AstNode *mods = make_list_node(AST_MODIFIER_LIST, loc);
+        ast_add_child(mods, make_keyword_leaf("static", loc));
+        ast_add_child(node, mods);
     }
     if (target) {
         ast_add_child(node, target);
@@ -51,12 +89,8 @@ static AstNode *make_import_node(bool is_static, bool on_demand, AstNode *target
     return node;
 }
 
-static AstNode *make_default_package_node(YYLTYPE loc) {
-    AstNode *node = AST_EMPTY_NODE(AST_PACKAGE_DECL, loc);
-    ast_set_text(node, "<default>");
-    return node;
-}
-
+// 构造默认包声明节点。
+// 构造 module 声明节点（可选 open 与指令）。
 static AstNode *make_module_decl_node(AstNode *name, AstNode *directives,
                                       bool is_open, YYLTYPE module_loc,
                                       const YYLTYPE *open_loc) {
@@ -75,12 +109,12 @@ static AstNode *make_module_decl_node(AstNode *name, AstNode *directives,
     return node;
 }
 
-static AstNode *make_module_directive_node(const char *keyword, YYLTYPE loc) {
-    AstNode *node = AST_BRANCH_AT(AST_UNKNOWN, loc, 0);
-    ast_set_text(node, keyword);
-    return node;
+// 构造 module 指令节点。
+static AstNode *make_module_directive_node(AstKind kind, YYLTYPE loc) {
+    return AST_BRANCH_AT(kind, loc, 0);
 }
 
+// 构造数组初始化器节点。
 static AstNode *make_array_initializer_node(AstNode *elements, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_ARRAY_INIT, loc, 0);
     if (elements) {
@@ -89,15 +123,22 @@ static AstNode *make_array_initializer_node(AstNode *elements, YYLTYPE loc) {
     return node;
 }
 
+// 将维度节点挂到类型或变量节点上。
 static void attach_dims(AstNode *node, AstNode *dims) {
     if (node && dims) {
         ast_add_child(node, dims);
     }
 }
 
-/* Forward declarations for helpers used before their definitions */
+/* 前置声明：供前面的语法动作提前引用。 */
+// 参数节点构造函数的前置声明。
 static AstNode *make_parameter_node(AstNode *type_node, AstNode *name_node, YYLTYPE loc);
+// 成员访问构造函数前置声明（供 receiver parameter 使用）。
+static AstNode *make_field_access_node(AstNode *base, AstNode *member, YYLTYPE loc);
+// 子句节点构造函数前置声明（供 for/init/cond/update 使用）。
+static AstNode *make_clause_node(AstKind kind, AstNode *payload, int line, int column);
 
+// 构造参数并附加维度。
 static AstNode *make_parameter_with_dims(AstNode *type_node, AstNode *name_node, AstNode *dims, YYLTYPE loc) {
     AstNode *param = make_parameter_node(type_node, name_node, loc);
     if (dims) {
@@ -106,6 +147,50 @@ static AstNode *make_parameter_with_dims(AstNode *type_node, AstNode *name_node,
     return param;
 }
 
+// 构造参数并前置修饰符。
+static AstNode *make_parameter_with_mods(AstNode *mods, AstNode *type_node,
+                                         AstNode *name_node, AstNode *dims, YYLTYPE loc) {
+    AstNode *param = make_parameter_with_dims(type_node, name_node, dims, loc);
+    if (mods) {
+        ast_prepend_child(param, mods);
+    }
+    return param;
+}
+
+// 标记可变参数。
+static AstNode *mark_varargs_parameter(AstNode *param) {
+    if (param) {
+        ast_set_text(param, "varargs");
+    }
+    return param;
+}
+
+// 构造 receiver parameter。
+static AstNode *make_receiver_parameter_node(AstNode *mods, AstNode *type_node,
+                                             AstNode *qualifier, YYLTYPE this_loc,
+                                             YYLTYPE loc) {
+    AstNode *name_node = make_keyword_leaf("this", this_loc);
+    if (qualifier) {
+        name_node = make_field_access_node(qualifier, name_node, this_loc);
+    }
+    AstNode *param = make_parameter_with_mods(mods, type_node, name_node, NULL, loc);
+    ast_set_text(param, "receiver");
+    return param;
+}
+
+// 合并修饰符与注解列表。
+static AstNode *merge_param_modifiers(AstNode *mods, AstNode *annotations, YYLTYPE loc) {
+    if (!annotations) {
+        return mods;
+    }
+    if (!mods) {
+        return make_modifiers_from_annotations(annotations, loc);
+    }
+    ast_add_child(mods, annotations);
+    return mods;
+}
+
+// 构造语句块节点并附带语句列表。
 static AstNode *make_block_node(YYLTYPE loc, AstNode *stmts) {
     AstNode *node = AST_BRANCH_AT(AST_BLOCK, loc, 0);
     if (stmts) {
@@ -114,10 +199,12 @@ static AstNode *make_block_node(YYLTYPE loc, AstNode *stmts) {
     return node;
 }
 
+// 构造无子节点的语句节点。
 static AstNode *make_simple_stmt(AstKind kind, YYLTYPE loc) {
     return AST_BRANCH_AT(kind, loc, 0);
 }
 
+// 构造一元语句节点。
 static AstNode *make_unary_stmt(AstKind kind, AstNode *child, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(kind, loc, 0);
     if (child) {
@@ -126,6 +213,7 @@ static AstNode *make_unary_stmt(AstKind kind, AstNode *child, YYLTYPE loc) {
     return node;
 }
 
+// 构造二元语句节点。
 static AstNode *make_binary_stmt(AstKind kind, AstNode *left, AstNode *right, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(kind, loc, 0);
     if (left) {
@@ -137,6 +225,7 @@ static AstNode *make_binary_stmt(AstKind kind, AstNode *left, AstNode *right, YY
     return node;
 }
 
+// 构造三元语句节点。
 static AstNode *make_ternary_stmt(AstKind kind, AstNode *a, AstNode *b, AstNode *c, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(kind, loc, 0);
     if (a) {
@@ -151,6 +240,107 @@ static AstNode *make_ternary_stmt(AstKind kind, AstNode *a, AstNode *b, AstNode 
     return node;
 }
 
+// 构造通配符节点。
+static AstNode *make_wildcard_node(AstNode *annotations, AstNode *bound, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_WILDCARD, loc, 0);
+    if (annotations) {
+        ast_add_child(node, annotations);
+    }
+    if (bound) {
+        ast_add_child(node, bound);
+    }
+    return node;
+}
+
+// 构造通配符边界节点（extends/super）。
+static AstNode *make_wildcard_bound_node(const char *kind, AstNode *types, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_WILDCARD_BOUND, loc, 0);
+    if (kind) {
+        ast_set_text(node, kind);
+    }
+    if (types) {
+        ast_add_child(node, types);
+    }
+    return node;
+}
+
+// 构造 else 子句节点。
+static AstNode *make_else_clause_node(AstNode *child, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_ELSE_CLAUSE, loc, 0);
+    if (child) {
+        ast_add_child(node, child);
+    }
+    return node;
+}
+
+// 查找方法返回类型节点（AST_TYPE）。
+static AstNode *find_method_return_type(AstNode *method) {
+    if (!method) {
+        return NULL;
+    }
+    for (size_t i = 0; i < method->child_count; ++i) {
+        AstNode *child = method->children[i];
+        if (child && child->kind == AST_TYPE) {
+            return child;
+        }
+    }
+    return NULL;
+}
+
+// 将修饰符末尾的注解移动到返回类型上（public @A int -> @A 归到 Type）。
+static void move_trailing_type_annotations(AstNode *mods, AstNode *method) {
+    if (!mods || !method || mods->kind != AST_MODIFIER_LIST) {
+        return;
+    }
+    AstNode *result_type = find_method_return_type(method);
+    if (!result_type) {
+        return;
+    }
+
+    int last_non_annot = -1;
+    for (size_t i = 0; i < mods->child_count; ++i) {
+        AstNode *child = mods->children[i];
+        if (child && child->kind != AST_ANNOTATION) {
+            last_non_annot = (int)i;
+        }
+    }
+    if (last_non_annot < 0) {
+        return; // 只有注解，保持为方法修饰符
+    }
+
+    size_t start = (size_t)last_non_annot + 1u;
+    if (start >= mods->child_count) {
+        return;
+    }
+
+    AstNode *ann_list = NULL;
+    for (size_t i = 0; i < result_type->child_count; ++i) {
+        AstNode *child = result_type->children[i];
+        if (child && child->kind == AST_ANNOTATION_LIST) {
+            ann_list = child;
+            break;
+        }
+    }
+    if (!ann_list) {
+        YYLTYPE dummy_loc = {0};
+        ann_list = make_list_node(AST_ANNOTATION_LIST, dummy_loc);
+        ast_prepend_child(result_type, ann_list);
+    }
+
+    for (size_t i = start; i < mods->child_count; ++i) {
+        AstNode *ann = mods->children[i];
+        if (ann) {
+            ast_add_child(ann_list, ann);
+        }
+    }
+
+    for (size_t i = start; i < mods->child_count; ++i) {
+        mods->children[i] = NULL;
+    }
+    mods->child_count = start;
+}
+
+// 构造增强 for 语句节点。
 static AstNode *make_foreach_stmt(AstNode *param, AstNode *iterable, AstNode *body, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_FOR_EACH, loc, 0);
     if (param) {
@@ -165,6 +355,7 @@ static AstNode *make_foreach_stmt(AstNode *param, AstNode *iterable, AstNode *bo
     return node;
 }
 
+// 构造 try 语句节点（含 catch/finally）。
 static AstNode *make_try_stmt(AstNode *block, AstNode *catches, AstNode *finally_node, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_TRY, loc, 0);
     if (block) {
@@ -179,17 +370,19 @@ static AstNode *make_try_stmt(AstNode *block, AstNode *catches, AstNode *finally
     return node;
 }
 
+// 构造 class 字面量节点。
 static AstNode *make_class_literal_node(AstNode *target, YYLTYPE loc) {
-    AstNode *node = AST_BRANCH_AT(AST_MEMBER_ACCESS, loc, 0);
+    AstNode *node = AST_BRANCH_AT(AST_CLASS_LITERAL, loc, 0);
     if (target) {
         ast_add_child(node, target);
     }
-    ast_add_child(node, make_keyword_leaf("class", loc));
     return node;
 }
 
+// 构造成员访问节点。
 static AstNode *make_field_access_node(AstNode *base, AstNode *member, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_MEMBER_ACCESS, loc, 0);
+    node->scope = base;
     if (base) {
         ast_add_child(node, base);
     }
@@ -199,6 +392,7 @@ static AstNode *make_field_access_node(AstNode *base, AstNode *member, YYLTYPE l
     return node;
 }
 
+// 构造数组访问节点。
 static AstNode *make_array_access_node(AstNode *base, AstNode *index, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_ARRAY_ACCESS, loc, 0);
     if (base) {
@@ -210,16 +404,18 @@ static AstNode *make_array_access_node(AstNode *base, AstNode *index, YYLTYPE lo
     return node;
 }
 
+// 构造方法调用节点。
 static AstNode *make_method_invocation_node(AstNode *qualifier, AstNode *type_args, AstNode *name, AstNode *args, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_METHOD_INVOCATION, loc, 0);
+    node->scope = qualifier;
     if (qualifier) {
         ast_add_child(node, qualifier);
     }
-    if (type_args) {
-        ast_add_child(node, type_args);
-    }
     if (name) {
         ast_add_child(node, name);
+    }
+    if (type_args) {
+        ast_add_child(node, type_args);
     }
     if (args) {
         ast_add_child(node, args);
@@ -229,8 +425,10 @@ static AstNode *make_method_invocation_node(AstNode *qualifier, AstNode *type_ar
     return node;
 }
 
+// 构造方法引用节点。
 static AstNode *make_method_reference_node(AstNode *target, AstNode *type_args, AstNode *name, YYLTYPE loc) {
-    AstNode *node = AST_BRANCH_AT(AST_MEMBER_ACCESS, loc, 0);
+    AstNode *node = AST_BRANCH_AT(AST_METHOD_REFERENCE, loc, 0);
+    node->scope = target;
     if (target) {
         ast_add_child(node, target);
     }
@@ -243,8 +441,10 @@ static AstNode *make_method_reference_node(AstNode *target, AstNode *type_args, 
     return node;
 }
 
+// 构造 new 类实例节点（含参数与类体）。
 static AstNode *make_new_class_core(AstNode *type, AstNode *args, AstNode *body, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_NEW_CLASS, loc, 0);
+    node->scope = NULL;
     if (type) {
         ast_add_child(node, type);
     }
@@ -259,6 +459,7 @@ static AstNode *make_new_class_core(AstNode *type, AstNode *args, AstNode *body,
     return node;
 }
 
+// 构造 lambda 表达式节点。
 static AstNode *make_lambda_node(AstNode *params, AstNode *body, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_LAMBDA, loc, 0);
     if (params) {
@@ -270,6 +471,7 @@ static AstNode *make_lambda_node(AstNode *params, AstNode *body, YYLTYPE loc) {
     return node;
 }
 
+// 构造赋值表达式节点。
 static AstNode *make_assignment_node(AstNode *lhs, AstNode *op, AstNode *rhs, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_ASSIGN, loc, 0);
     if (lhs) {
@@ -284,6 +486,7 @@ static AstNode *make_assignment_node(AstNode *lhs, AstNode *op, AstNode *rhs, YY
     return node;
 }
 
+// 构造二元表达式节点。
 static AstNode *make_binary_expr(AstNode *lhs, const char *op, AstNode *rhs, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_BINARY_EXPR, loc, 0);
     if (lhs) {
@@ -298,20 +501,41 @@ static AstNode *make_binary_expr(AstNode *lhs, const char *op, AstNode *rhs, YYL
     return node;
 }
 
-static AstNode *make_unary_expr(const char *op, AstNode *expr, YYLTYPE loc, bool postfix) {
-    AstNode *node = AST_BRANCH_AT(AST_UNARY_EXPR, loc, 0);
-    if (!postfix && op) {
-        ast_add_child(node, make_keyword_leaf(op, loc));
+// 构造 instanceof 表达式节点。
+static AstNode *make_instanceof_expr(AstNode *lhs, AstNode *rhs, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_INSTANCEOF, loc, 0);
+    if (lhs) {
+        ast_add_child(node, lhs);
     }
-    if (expr) {
-        ast_add_child(node, expr);
-    }
-    if (postfix && op) {
-        ast_add_child(node, make_keyword_leaf(op, loc));
+    if (rhs) {
+        ast_add_child(node, rhs);
     }
     return node;
 }
 
+// 构造一元表达式节点（前/后缀）。
+static AstNode *make_unary_expr(const char *op, AstNode *expr, YYLTYPE loc, bool postfix) {
+    AstNode *node = AST_BRANCH_AT(AST_UNARY_EXPR, loc, 0);
+    ast_set_text(node, postfix ? "postfix" : "prefix");
+    if (postfix) {
+        if (expr) {
+            ast_add_child(node, expr);
+        }
+        if (op) {
+            ast_add_child(node, make_keyword_leaf(op, loc));
+        }
+    } else {
+        if (op) {
+            ast_add_child(node, make_keyword_leaf(op, loc));
+        }
+        if (expr) {
+            ast_add_child(node, expr);
+        }
+    }
+    return node;
+}
+
+// 构造三元条件表达式节点。
 static AstNode *make_conditional_expr(AstNode *cond, AstNode *if_true, AstNode *if_false, YYLTYPE loc) {
     AstNode *node = AST_BRANCH_AT(AST_CONDITIONAL_EXPR, loc, 0);
     if (cond) {
@@ -326,8 +550,9 @@ static AstNode *make_conditional_expr(AstNode *cond, AstNode *if_true, AstNode *
     return node;
 }
 
+// 构造数组创建表达式节点。
 static AstNode *make_array_creation_node(AstNode *type, AstNode *dim_exprs, AstNode *dims, AstNode *initializer, YYLTYPE loc) {
-    AstNode *node = AST_BRANCH_AT(AST_NEW_CLASS, loc, 0);
+    AstNode *node = AST_BRANCH_AT(AST_ARRAY_CREATION, loc, 0);
     if (type) {
         ast_add_child(node, type);
     }
@@ -343,8 +568,9 @@ static AstNode *make_array_creation_node(AstNode *type, AstNode *dim_exprs, AstN
     return node;
 }
 
+// 构造类型转换表达式节点。
 static AstNode *make_cast_expr(AstNode *type, AstNode *expr, YYLTYPE loc) {
-    AstNode *node = AST_BRANCH_AT(AST_EXPRESSION, loc, 0);
+    AstNode *node = AST_BRANCH_AT(AST_CAST, loc, 0);
     if (type) {
         ast_add_child(node, type);
     }
@@ -354,6 +580,7 @@ static AstNode *make_cast_expr(AstNode *type, AstNode *expr, YYLTYPE loc) {
     return node;
 }
 
+// 构造参数节点。
 static AstNode *make_parameter_node(AstNode *type_node, AstNode *name_node, YYLTYPE loc) {
     AstNode *param = ast_branch(AST_PARAMETER, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (type_node) {
@@ -365,6 +592,41 @@ static AstNode *make_parameter_node(AstNode *type_node, AstNode *name_node, YYLT
     return param;
 }
 
+// 构造类型匹配模式节点。
+static AstNode *make_type_pattern_node(AstNode *mods, AstNode *type_node,
+                                       AstNode *decl_node, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_TYPE_PATTERN, loc, 0);
+    if (mods) {
+        ast_add_child(node, mods);
+    }
+    if (type_node) {
+        ast_add_child(node, type_node);
+    }
+    if (decl_node) {
+        ast_add_child(node, decl_node);
+    }
+    return node;
+}
+
+// 构造 try-with-resources 资源声明节点。
+static AstNode *make_resource_decl(AstNode *mods, AstNode *type_node,
+                                   AstNode *name_node, AstNode *expr,
+                                   YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_RESOURCE_DECL, loc, 0);
+    if (mods) {
+        ast_add_child(node, mods);
+    }
+    if (type_node || name_node) {
+        AstNode *param = make_parameter_node(type_node, name_node, loc);
+        ast_add_child(node, param);
+    }
+    if (expr) {
+        ast_add_child(node, expr);
+    }
+    return node;
+}
+
+// 构造参数/实参列表节点并加入首个参数。
 static AstNode *make_params_list(AstNode *first, YYLTYPE loc) {
     AstNode *list = ast_branch(AST_ARGUMENT_LIST, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (first) {
@@ -373,6 +635,7 @@ static AstNode *make_params_list(AstNode *first, YYLTYPE loc) {
     return list;
 }
 
+// 构造方法签名节点（名称 + 参数）。
 static AstNode *make_method_signature(AstNode *name_node, AstNode *params_node, YYLTYPE loc) {
     AstNode *method = ast_branch(AST_METHOD_DECL, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (name_node) {
@@ -386,6 +649,7 @@ static AstNode *make_method_signature(AstNode *name_node, AstNode *params_node, 
     return method;
 }
 
+// 构造注解元素声明节点。
 static AstNode *make_annotation_element_decl(AstNode *modifiers, AstNode *type_node,
                                              AstNode *name_node, AstNode *dims_node,
                                              AstNode *default_value, YYLTYPE loc) {
@@ -405,6 +669,7 @@ static AstNode *make_annotation_element_decl(AstNode *modifiers, AstNode *type_n
     return method;
 }
 
+// 构造构造器声明节点。
 static AstNode *make_constructor_node(AstNode *name_node, AstNode *params_node, YYLTYPE loc) {
     AstNode *ctor = ast_branch(AST_CONSTRUCTOR_DECL, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (name_node) {
@@ -418,22 +683,62 @@ static AstNode *make_constructor_node(AstNode *name_node, AstNode *params_node, 
     return ctor;
 }
 
+// 构造显式构造器调用节点（this/super）。
 static AstNode *make_explicit_ctor_invocation(AstNode *qualifier, AstNode *type_args,
                                               const char *name, AstNode *args, YYLTYPE loc) {
-    AstNode *name_node = make_keyword_leaf(name, loc);
-    return make_method_invocation_node(qualifier, type_args, name_node,
-                                       args ? args : make_list_node(AST_ARGUMENT_LIST, loc),
-                                       loc);
-}
-
-static AstNode *make_throws_node(AstNode *types, YYLTYPE loc) {
-    AstNode *node = ast_branch(AST_ARGUMENT_LIST, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
-    if (types) {
-        ast_add_child(node, types);
+    AstNode *node = AST_BRANCH_AT(AST_EXPLICIT_CTOR_INVOCATION, loc, 0);
+    if (name) {
+        ast_set_text(node, name);
+    }
+    if (qualifier) {
+        ast_add_child(node, qualifier);
+    }
+    if (type_args) {
+        ast_add_child(node, type_args);
+    }
+    if (args) {
+        ast_add_child(node, args);
+    } else {
+        ast_add_child(node, make_list_node(AST_ARGUMENT_LIST, loc));
     }
     return node;
 }
 
+// 构造 for 语句的初始化/条件/更新部分节点。
+static AstNode *make_for_part_node(AstKind kind, AstNode *payload, YYLTYPE loc) {
+    if (!payload) {
+        payload = make_simple_stmt(AST_EMPTY, loc);
+    }
+    return make_clause_node(kind, payload, AST_LOC_LINE(loc), AST_LOC_COL(loc));
+}
+
+// 构造传统 for 语句节点。
+static AstNode *make_for_stmt(AstNode *init, AstNode *cond, AstNode *update,
+                              AstNode *body, YYLTYPE loc) {
+    AstNode *node = AST_BRANCH_AT(AST_FOR, loc, 0);
+    ast_add_child(node, make_for_part_node(AST_FOR_INIT, init, loc));
+    ast_add_child(node, make_for_part_node(AST_FOR_COND, cond, loc));
+    ast_add_child(node, make_for_part_node(AST_FOR_UPDATE, update, loc));
+    if (body) {
+        ast_add_child(node, body);
+    }
+    return node;
+}
+
+// 构造 throws 列表节点。
+static AstNode *make_throws_node(AstNode *types, YYLTYPE loc) {
+    if (!types) {
+        return NULL;
+    }
+    if (types->kind == AST_EXCEPTION_TYPE_LIST) {
+        return types;
+    }
+    AstNode *node = ast_branch(AST_EXCEPTION_TYPE_LIST, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    ast_add_child(node, types);
+    return node;
+}
+
+// 构造枚举常量节点。
 static AstNode *make_enum_constant(AstNode *annotations, AstNode *name,
                                    AstNode *args, AstNode *class_body, YYLTYPE loc) {
     AstNode *node = ast_branch(AST_ENUM_CONST, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
@@ -454,6 +759,7 @@ static AstNode *make_enum_constant(AstNode *annotations, AstNode *name,
     return node;
 }
 
+// 构造字段声明节点。
 static AstNode *make_field_node(AstNode *mods, AstNode *type_node, AstNode *vars_node, YYLTYPE loc) {
     AstNode *field = ast_branch(AST_FIELD_DECL, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
 
@@ -466,22 +772,26 @@ static AstNode *make_field_node(AstNode *mods, AstNode *type_node, AstNode *vars
     if (vars_node) {
         ast_add_child(field, vars_node);
     } else {
-        ast_add_child(field, make_list_node(AST_STATEMENT_LIST, loc));
+        ast_add_child(field, make_list_node(AST_VAR_DECL_LIST, loc));
     } 
     return field;
 }
 
 
 
-static AstNode *make_local_variable_node(AstNode *type_node, AstNode *vars_node, YYLTYPE loc) {
+// 构造本地变量声明节点。
+static AstNode *make_local_variable_node(AstNode *mods, AstNode *type_node, AstNode *vars_node, YYLTYPE loc) {
     AstNode *stmt = ast_branch(AST_LOCAL_VAR_DECL, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    if (mods) {
+        ast_add_child(stmt, mods);
+    }
     if (type_node) {
         ast_add_child(stmt, type_node);
     }
     if (vars_node) {
         ast_add_child(stmt, vars_node);
     } else {
-        ast_add_child(stmt, make_list_node(AST_STATEMENT_LIST, loc));
+        ast_add_child(stmt, make_list_node(AST_VAR_DECL_LIST, loc));
     } 
     return stmt;
 }
@@ -490,21 +800,42 @@ static AstNode *make_local_variable_node(AstNode *type_node, AstNode *vars_node,
 static AstNode *make_annotation_node      (AstNode *name, YYLTYPE loc);
 static AstNode *make_type_node            (AstNode *core, YYLTYPE loc);
 static AstNode *make_type_parameter_node  (AstNode *name, AstNode *bounds, YYLTYPE loc);
-static AstNode *make_type_argument_node   (AstNode *value, YYLTYPE loc);
+static AstNode *make_type_argument_type_node(AstNode *type_node, YYLTYPE loc);
+static AstNode *make_type_argument_wildcard_node(AstNode *wildcard_node, YYLTYPE loc);
+static AstNode *make_type_bound_node(const char *kind, AstNode *primary, AstNode *additional, YYLTYPE loc);
 static AstNode *make_dim_node             (YYLTYPE loc);
 
 /* simple stmt / unary stmt / binary stmt / foreach / try */
+// 构造无子节点的语句节点。
 static AstNode *make_simple_stmt(AstKind kind, YYLTYPE loc);
+// 构造一元语句节点。
 static AstNode *make_unary_stmt(AstKind kind, AstNode *child, YYLTYPE loc);
+// 构造二元语句节点。
 static AstNode *make_binary_stmt(AstKind kind, AstNode *left, AstNode *right, YYLTYPE loc);
+// 构造增强 for 语句节点。
 static AstNode *make_foreach_stmt         (AstNode *param, AstNode *expr, AstNode *body, YYLTYPE loc);
+// 构造 try 语句节点（含 catch/finally）。
 static AstNode *make_try_stmt             (AstNode *block, AstNode *catches, AstNode *finally_block, YYLTYPE loc);
 
-/* 参数、变量、本地变量 */
+/* 参数、变量、本地变?*/
+// 构造参数并附加维度。
 static AstNode *make_parameter_with_dims  (AstNode *type_node, AstNode *name_node,
                                            AstNode *dims, YYLTYPE loc);
+// 构造参数节点。
 static AstNode *make_parameter_node       (AstNode *type_node, AstNode *name_node, YYLTYPE loc);
-static AstNode *make_local_variable_node  (AstNode *type_node, AstNode *vars_node, YYLTYPE loc);
+// 构造本地变量声明节点。
+static AstNode *make_local_variable_node  (AstNode *mods, AstNode *type_node, AstNode *vars_node, YYLTYPE loc);
+// 构造类型匹配模式节点。
+static AstNode *make_type_pattern_node (AstNode *mods, AstNode *type_node, AstNode *decl_node, YYLTYPE loc);
+static AstNode *make_clause_node(AstKind kind, AstNode *payload, int line, int column) {
+    AstNode *node = ast_branch(kind, line, column, 0);
+    if (payload) {
+        ast_add_child(node, payload);
+    }
+    return node;
+}
+
+// 构造类声明基础节点。
 static AstNode *make_class_basic(int line, int column, 
                                AstNode *modifiers, 
                                AstNode *name, 
@@ -513,6 +844,15 @@ static AstNode *make_class_basic(int line, int column,
                                AstNode *super_interfaces,
                                AstNode *permits,
                                AstNode *body);
+// 构造注解类型声明基础节点。
+static AstNode *make_annotation_decl_basic(int line, int column,
+                                           AstNode *modifiers,
+                                           AstNode *name,
+                                           AstNode *type_params,
+                                           AstNode *extends_interfaces,
+                                           AstNode *permits,
+                                           AstNode *body);
+// 构造接口声明基础节点。
 static AstNode *make_interface_basic(int line, int column, 
                                    AstNode *modifiers,
                                    AstNode *name, 
@@ -520,37 +860,61 @@ static AstNode *make_interface_basic(int line, int column,
                                    AstNode *extends_interfaces,
                                    AstNode *permits,
                                    AstNode *body);
+// 构造注解元素声明节点。
 static AstNode *make_annotation_element_decl(AstNode *modifiers, AstNode *type_node,
                                              AstNode *name_node, AstNode *dims_node,
                                              AstNode *default_value, YYLTYPE loc);
 
 /* 访问相关：field / class-literal / dims / new-class / array */
+// 构造成员访问节点。
 static AstNode *make_field_access_node    (AstNode *qualifier, AstNode *name, YYLTYPE loc);
+// 构造 class 字面量节点。
 static AstNode *make_class_literal_node   (AstNode *type_or_kw, YYLTYPE loc);
+// 构造 new 类实例节点（含参数与类体）。
 static AstNode *make_new_class_core       (AstNode *type, AstNode *args, AstNode *body, YYLTYPE loc);
+// 构造数组访问节点。
 static AstNode *make_array_access_node    (AstNode *array_expr, AstNode *index_expr, YYLTYPE loc);
+// 构造数组创建表达式节点。
 static AstNode *make_array_creation_node  (AstNode *type, AstNode *dim_exprs,
                                            AstNode *dims, AstNode *initializer, YYLTYPE loc);
 
-/* 调用 / 方法引用 / lambda / 赋值 / 条件表达式 / 一元二元表达式 / 强制类型转换 */
+/* 调用 / 方法引用 / lambda / 赋?/ 条件表达?/ 一元二元表达式 / 强制类型转换 */
+// 构造方法调用节点。
 static AstNode *make_method_invocation_node (AstNode *qualifier, AstNode *type_args,
                                              AstNode *name, AstNode *args, YYLTYPE loc);
+// 构造方法引用节点。
 static AstNode *make_method_reference_node  (AstNode *qualifier, AstNode *type_args,
                                              AstNode *name, YYLTYPE loc);
+// 构造 lambda 表达式节点。
 static AstNode *make_lambda_node            (AstNode *params, AstNode *body, YYLTYPE loc);
+// 构造赋值表达式节点。
 static AstNode *make_assignment_node        (AstNode *lhs, AstNode *op, AstNode *rhs, YYLTYPE loc);
+// 构造三元条件表达式节点。
 static AstNode *make_conditional_expr       (AstNode *cond, AstNode *then_expr,
                                              AstNode *else_expr, YYLTYPE loc);
+// 构造二元表达式节点。
 static AstNode *make_binary_expr            (AstNode *lhs, const char *op,
                                              AstNode *rhs, YYLTYPE loc);
+// 构造 instanceof 表达式节点。
+static AstNode *make_instanceof_expr        (AstNode *lhs, AstNode *rhs, YYLTYPE loc);
+// 构造一元表达式节点（前/后缀）。
 static AstNode *make_unary_expr             (const char *op, AstNode *expr,
                                              YYLTYPE loc, bool is_postfix);
+// 构造类型转换表达式节点。
 static AstNode *make_cast_expr              (AstNode *type, AstNode *expr, YYLTYPE loc);
 
 /* 通用构造：列表、关键字叶子 */
+// 生成指定种类的空列表节点。
 static AstNode *make_list_node(AstKind kind, YYLTYPE loc);
+// 用关键字文本生成标识符叶子节点。
 static AstNode *make_keyword_leaf           (const char *kw, YYLTYPE loc);
 static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE loc);
+%}
+
+%code requires {
+#include "java_ast.h"
+}
+
 %union {
     char* str;
     int val;
@@ -559,77 +923,77 @@ static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE lo
 
 %locations
 
-// LPAREN_LambdaParameters RPAREN_LambdaParameters UPLUS UMINUS 待研究
+// %token LPAREN_LambdaParameters            // LambdaParameters 中的 '(' 符号（之前有冲突，调试后发现冲突意外没了，故建议保留以便后续研究）
 
 // %expect 0
 
-%token AMPERSAND RPAREN_CastExpression
+%token AMPERSAND RPAREN_CastExpression // 辅助处理按位与与类型转换右括号的 token
 
 // %token IDENTIFIER
-%token <node> TYPE_IDENTIFIER_IdentifierforLambdaParameterList               // 向后检查两个是 '(' ARROW 或者向后检查一个是 ARROW 或者向后检查一个是 ','  就在向后检查两个
-%token <node> VAR_IdentifierComplement_IdentifierforLambdaParameterList
-%token <node> YIELD_IdentifierComplement_IdentifierforLambdaParameterList
-%token <node> TYPE_IDENTIFIER_MethodDeclarator
-%token <node> VAR_MethodDeclarator
-%token <node> YIELD_MethodDeclarator
-%token <node> TYPE_IDENTIFIER_AnnotationIdentifiers
-%token <node> VAR_AnnotationIdentifiers
-%token <node> YIELD_AnnotationIdentifiers
-%token <node> TYPE_IDENTIFIER
-%token <node> TYPE_IDENTIFIER_EnumDeclaration
+%token <node> TYPE_IDENTIFIER_IdentifierforLambdaParameterList // 向后检查两个是 '(' ARROW，或者向后检查一个是 ARROW，或者向后检查一个是 ','，就在向后检查两个 token。
+%token <node> VAR_IdentifierComplement_IdentifierforLambdaParameterList // lambda 参数列表中的 var 标识符补全
+%token <node> YIELD_IdentifierComplement_IdentifierforLambdaParameterList // lambda 参数列表中的 yield 标识符补全
+%token <node> TYPE_IDENTIFIER_MethodDeclarator // 方法声明中的类型标识符
+%token <node> VAR_MethodDeclarator // 方法声明中的 var 标识符
+%token <node> YIELD_MethodDeclarator // 方法声明中的 yield 标识符
+%token <node> TYPE_IDENTIFIER_AnnotationIdentifiers // 注解名中的类型标识符
+%token <node> VAR_AnnotationIdentifiers // 注解名中的 var 标识符
+%token <node> YIELD_AnnotationIdentifiers // 注解名中的 yield 标识符
+%token <node> TYPE_IDENTIFIER // 类型标识符
+%token <node> TYPE_IDENTIFIER_EnumDeclaration // 枚举声明中的类型标识符
 
-%token LANGLE                             // TypeArguments 、 TypeParameters 中尖括号的左半边
-%token AT_Dims                            // Dims 中的原 '@' 符号
-%token AT_Modifier                        // Modifier 中的原 '@' 符号
-%token AT_AnnotationTypeDeclaration       // AnnotationTypeDeclaration 中的原 '@' 符号
-%token LBRACK                             // DimsNoAnnotations 中的原 '[' 符号
-%token LBRACK_ArrayAccess                 // 向后判断一个token不为']'的'['
-// %token LPAREN_LambdaParameters            // LambdaParameters 中的原 '(' 符号 （之前有冲突后来调试发现冲突意外没了，不清楚什么情况，故而建议不删以待后续研究）
-// %token RPAREN_LambdaParameters            // LambdaParameters 中的原 ')' 符号
+%token LANGLE // TypeArguments / TypeParameters 中尖括号的左半边
+%token AT_Dims // Dims 中的 '@' 符号
+%token AT_Modifier // Modifier 中的 '@' 符号
+%token AT_AnnotationTypeDeclaration // AnnotationTypeDeclaration 中的 '@' 符号
+%token LBRACK // DimsNoAnnotations 中的 '[' 符号
+%token LBRACK_ArrayAccess // 向后判断一个 token 不为 ']' 的 '['
+// %token LPAREN_LambdaParameters            // LambdaParameters 中的 '(' 符号（之前有冲突，调试后发现冲突意外没了，故建议保留以便后续研究）
+// %token RPAREN_LambdaParameters            // LambdaParameters 中的 ')' 符号
 
-%token DEFAULT_SwitchLabel                // SwitchLabel 中的原 Default 关键字（判断 ARROW 和 ':' ）
-%token DOT
-%token DOT_CommonName           // CommonName 中的原 '.' 符号 （向前检测一个为 TYPE_IDENTIFIER 或者 IdentifierComplement ，向后也是）
-%token <node> VAR_IdentifierComplement
-%token <node> YIELD_IdentifierComplement
-%token CLASS
-%token BYTE INT SHORT LONG CHAR
-%token FLOAT DOUBLE
-%token EXTENDS SUPER
-%token OPEN OPENS
-%token REQUIRES EXPORTS USES PROVIDES
-%token PACKAGE
-%token IMPORT
-%token PUBLIC PROTECTED PRIVATE ABSTRACT STATIC FINAL STRICTFP TRANSITIVE
-%token IMPLEMENTS
-%token TRANSIENT VOLATILE
-%token SYNCHRONIZED NATIVE
-%token BOOLEAN
-%token VOID
-%token THROW THROWS
-%token THIS
-%token ENUM
-%token INTERFACE
-%token DEFAULT
-%token VAR
-%token IF ELSE ASSERT SWITCH
-%token CASE
-%token DO WHILE FOR
-%token BREAK YIELD CONTINUE RETURN
-%token TRY CATCH
-%token FINALLY
-%token NEW
-%token MODULE
-%token <node> UnqualifiedMethodIdentifier
-%token <node> NUMBER
-%token <node> TRUE FALSE
-%token <node> INTEGERLITERAL
-%token <node> FLOATINGPOINTLITERAL
-%token <node> CHARACTERLITERAL
-%token <node> STRINGLITERAL
-%token <node> MY_NULL
+%token DEFAULT_SwitchLabel // SwitchLabel 中的 Default 关键字（根据后续 ARROW 或 ':' 判定）
+%token DOT // '.' 符号
+%token DOT_CommonName // CommonName 中的 '.' 符号（向前检测一个为 TYPE_IDENTIFIER 或 IdentifierComplement，向后也是）
+%token <node> VAR_IdentifierComplement // 标识符补全：var
+%token <node> YIELD_IdentifierComplement // 标识符补全：yield
+%token CLASS // class 关键字
+%token BYTE INT SHORT LONG CHAR // 整型/字符型关键字
+%token FLOAT DOUBLE // 浮点类型关键字
+%token EXTENDS SUPER // extends/super 关键字
+%token OPEN OPENS // 模块 open/opens 关键字
+%token REQUIRES EXPORTS USES PROVIDES // 模块指令关键字
+%token PACKAGE // package 关键字
+%token IMPORT // import 关键字
+%token PUBLIC PROTECTED PRIVATE ABSTRACT STATIC FINAL STRICTFP TRANSITIVE // 修饰符关键字
+%token IMPLEMENTS // implements 关键字
+%token TRANSIENT VOLATILE // 字段修饰符关键字
+%token SYNCHRONIZED NATIVE // 方法修饰符关键字
+%token BOOLEAN // boolean 关键字
+%token VOID // void 关键字
+%token THROW THROWS // throw/throws 关键字
+%token THIS // this 关键字
+%token ENUM // enum 关键字
+%token INTERFACE // interface 关键字
+%token DEFAULT // default 关键字
+%token VAR // var 关键字
+%token IF ELSE ASSERT SWITCH // 控制流关键字
+%token CASE // case 关键字
+%token DO WHILE FOR // 循环关键字
+%token BREAK YIELD CONTINUE RETURN // 跳转/返回关键字
+%token TRY CATCH // try/catch 关键字
+%token FINALLY // finally 关键字
+%token NEW // new 关键字
+%token MODULE // module 关键字
+%token <node> UnqualifiedMethodIdentifier // 不带限定的方法标识符
+%token <node> NUMBER // 数值字面量（词法归并）
+%token <node> TRUE FALSE // 布尔字面量
+%token <node> INTEGERLITERAL // 整数字面量
+%token <node> FLOATINGPOINTLITERAL // 浮点字面量
+%token <node> CHARACTERLITERAL // 字符字面量
+%token <node> STRINGLITERAL // 字符串字面量
+%token <node> MY_NULL // null 字面量
 
-// 定义多字符运算符的 Token
+// 定义多字符运算符 Token
 %token LE GE EQ NE AND OR     // <= >= == != && ||
 %token TO WITH ARROW DIAMOND  // to with -> <>
 %token DOUBLE_COLON // "::"
@@ -650,38 +1014,39 @@ static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE lo
 %token USHR_OP      // ">>>"   
 %token INC_OP       // "++"    
 %token DEC_OP       // "--"
-%token PREFIX_INC PREFIX_DEC
+%token PREFIX_INC PREFIX_DEC // 前缀 ++/-- 运算符
 %token ELLIPSIS     // "..."
 %token TRAILING_COMMA  // ","
 
-%token <node> TextBlock    // 文本框模块
-%token SEALED NON_SEALED
-%token <node> SEALED_IdentifierComplement
-%token <node> NON_SEALED_IdentifierComplement
-%token PERMITS
-%token EMPTY_STMT
+%token <node> TextBlock // 文本块
+%token SEALED NON_SEALED // sealed 修饰符关键字
+%token <node> SEALED_IdentifierComplement // 标识符补全：sealed
+%token <node> NON_SEALED_IdentifierComplement // 标识符补全：non-sealed
+%token PERMITS // permits 关键字
+%token EMPTY_STMT // 空语句
 
-// 待确定以下顺序的唯一正确性
-%nonassoc PREC_ConditionalExpression_1
-%nonassoc PREC_ConditionalExpression
-%nonassoc PREC_ConditionalOrExpression_1
-%nonassoc PREC_ConditionalAndExpression
-%nonassoc PREC_ConditionalAndExpression_1
-%nonassoc PREC_InclusiveOrExpression
-%nonassoc PREC_InclusiveOrExpression_1
-%nonassoc PREC_ExclusiveOrExpression
-%nonassoc PREC_ExclusiveOrExpression_1
-%nonassoc PREC_AndExpression
-%nonassoc PREC_AndExpression_1
-%nonassoc PREC_EqualityExpression
-%nonassoc PREC_RelationalExpression
-%nonassoc PREC_RelationalExpression_1
-%nonassoc PREC_SimpleRelationalExpression
-%nonassoc PREC_ShiftExpression
-%nonassoc PREC_ShiftExpression_1
-%nonassoc PREC_AdditiveExpression
-%nonassoc PREC_AdditiveExpression_1
-%nonassoc PREC_MultiplicativeExpression
+// 待确定以下顺序的唯一正确方案。
+// 以下为优先级标记（不直接对应词法 token）。
+%nonassoc PREC_ConditionalExpression_1 // 条件表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_ConditionalExpression // 条件表达式优先级（完整 ?: 规则）
+%nonassoc PREC_ConditionalOrExpression_1 // 条件或表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_ConditionalAndExpression // 条件与表达式优先级（完整规则）
+%nonassoc PREC_ConditionalAndExpression_1 // 条件与表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_InclusiveOrExpression // 按位或表达式优先级（完整规则）
+%nonassoc PREC_InclusiveOrExpression_1 // 按位或表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_ExclusiveOrExpression // 按位异或表达式优先级（完整规则）
+%nonassoc PREC_ExclusiveOrExpression_1 // 按位异或表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_AndExpression // 按位与表达式优先级（完整规则）
+%nonassoc PREC_AndExpression_1 // 按位与表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_EqualityExpression // 相等性表达式优先级
+%nonassoc PREC_RelationalExpression // 关系表达式优先级（含 instanceof）
+%nonassoc PREC_RelationalExpression_1 // 关系表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_SimpleRelationalExpression // 简单关系表达式优先级（不递归扩展）
+%nonassoc PREC_ShiftExpression // 移位表达式优先级（完整规则）
+%nonassoc PREC_ShiftExpression_1 // 移位表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_AdditiveExpression // 加减表达式优先级（完整规则）
+%nonassoc PREC_AdditiveExpression_1 // 加减表达式优先级（用于禁止递归扩展）
+%nonassoc PREC_MultiplicativeExpression // 乘除模表达式优先级
 
 %left ','                        // ,（逗号运算符） 
 %right '=' ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN DIV_ASSIGN MOD_ASSIGN OR_ASSIGN XOR_ASSIGN AND_ASSIGN SHL_ASSIGN SHR_ASSIGN USHR_ASSIGN   // = += -= *= /= %= |= ^= &= <<= >>= >>>=
@@ -690,23 +1055,23 @@ static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE lo
 // %right ':'                   // ? :
 %left OR                         // ||（逻辑或）
 %left AND                        // &&（逻辑与）
-%left '|'                        // |（按位或）
+%left '|' // |（按位或）
 %left '^'                        // ^（按位异或）
-%left '&'                        // &（按位与）
+%left '&' // &（按位与）
 %left EQ NE                      // == !=（相等比较）
 %left TO WITH                    // to with
 %nonassoc INSTANCEOF             // instanceof（类型检查）
 %left '<' '>' LE GE LT_RelationalExpression             // < > <= >=
 %left SHL_OP SHR_OP USHR_OP      // << >> >>>（位移运算）
-%left '+' '-'                    // + -（加减号）
+%left '+' '-' // + -（加减号）
 %left '*' '/' '%'                // * / %
-%left '.' DOT DOUBLE_COLON       // . ::  （ DOUBLE_COLON_MethodReference_COI DOUBLE_COLON_MethodReference_AT ）
-%right '!' '~'                   // !(逻辑非) ~（按位取反）
-%nonassoc PREFIX_INC PREFIX_DEC  // ++ --(前缀形式) （UPLUS UMINUS（+-正负号））
+%left '.' DOT DOUBLE_COLON // . ::（DOUBLE_COLON_MethodReference_COI / DOUBLE_COLON_MethodReference_AT）
+%right '!' '~' // !(逻辑非) ~（按位取反）
+%nonassoc PREFIX_INC PREFIX_DEC // ++ --（前缀形式）（UPLUS UMINUS 作为正负号）
 %left INC_OP DEC_OP              // ++ -- (后缀形式) 
-%left '[' ']' LBRACK RBRACK '(' ')'    // [] () （ LPAREN_LambdaParameters RPAREN_LambdaParameters ）
+%left '[' ']' LBRACK RBRACK '(' ')' // [] () LPAREN_LambdaParameters RPAREN_LambdaParameters
 
-%left '@'  AT_Dims AT_Modifier AT_AnnotationTypeDeclaration
+%left '@'  AT_Dims AT_Modifier AT_AnnotationTypeDeclaration // 注解相关优先级
 
 %start CompilationUnit
 
@@ -726,7 +1091,7 @@ static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE lo
 %type <node> ClassBody ClassBodyDeclarationList ClassBodyDeclaration ClassMemberDeclaration
 %type <node> FieldDeclaration MethodDeclaration ConstructorDeclaration
 %type <node> MethodHeader MethodBody MethodDeclarator
-%type <node> FormalParameterList FormalParameter VariableArityParameter
+%type <node> FormalParameterList FormalParameter VariableArityParameter ReceiverParameter
 %type <node> VariableDeclaratorList VariableDeclarator VariableDeclaratorId ArrayInitializer VariableInitializerList VariableInitializer
 %type <node> UnannType UnannPrimitiveType UnannReferenceType
 %type <node> UnannClassOrInterfaceType UnannArrayType NumericType IntegralType FloatingPointType
@@ -755,8 +1120,10 @@ static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE lo
 %type <node> Block BlockStatements BlockStatement LocalVariableDeclarationStatement LocalVariableDeclaration LocalVariableType LocalClassOrInterfaceDeclaration Statement StatementNoShortIf StatementWithoutTrailingSubstatement EmptyStatement LabeledStatement LabeledStatementNoShortIf ExpressionStatement StatementExpression IfThenStatement IfThenElseStatement IfThenElseStatementNoShortIf AssertStatement SwitchStatement SwitchBlock SwitchRule SwitchRules SwitchBlockStatementGroup SwitchBlockStatementGroups SwitchLabel SwitchLabels CaseConstant CaseConstants WhileStatement WhileStatementNoShortIf DoStatement ForStatement ForStatementNoShortIf BasicForStatement BasicForStatementNoShortIf ForInit ForUpdate StatementExpressionList EnhancedForStatement EnhancedForStatementNoShortIf BreakStatement YieldStatement ContinueStatement ReturnStatement ThrowStatement SynchronizedStatement TryStatement Catches CatchClause CatchFormalParameter CatchType Finally
 %type <node> VariableModifiers
 
+/* 语法规则：各产生式构建 AST 节点。 */
 %%
 
+// 标识符补全关键字集合（var/yield/sealed 等）。
 IdentifierComplement:
     VAR_IdentifierComplement        { $$ = $1; }
     | SEALED_IdentifierComplement   { $$ = $1; }
@@ -764,12 +1131,14 @@ IdentifierComplement:
     | YIELD_IdentifierComplement    { $$ = $1; }
 ;
 
+// 方法声明用的标识符入口（含 var/yield 补全）。
 IDENTIFIER_MethodDeclarator:
     TYPE_IDENTIFIER_MethodDeclarator { $$ = $1; }
     | VAR_MethodDeclarator { $$ = $1; }
     | YIELD_MethodDeclarator { $$ = $1; }
 ;
 
+// 注解标识符入口（含 var/yield 补全）。
 IDENTIFIER_AnnotationIdentifiers:
     TYPE_IDENTIFIER_AnnotationIdentifiers { $$ = $1; }
     | VAR_AnnotationIdentifiers { $$ = $1; }
@@ -777,6 +1146,7 @@ IDENTIFIER_AnnotationIdentifiers:
 ;
 
 // 词法定义
+// 字面量：整数/浮点/字符/字符串/布尔/null。
 Literal:
     INTEGERLITERAL         { $$ = $1; }
     | FLOATINGPOINTLITERAL { $$ = $1; }
@@ -788,6 +1158,7 @@ Literal:
     | MY_NULL              { $$ = $1; }
 ;
 
+// 修饰符：访问控制与声明修饰关键字。
 Modifier:
     Annotation_Modifier { $$ = $1; }
 //    Annotation
@@ -806,6 +1177,7 @@ Modifier:
     | SEALED { $$ = make_keyword_leaf("sealed", @1); }
     | NON_SEALED { $$ = make_keyword_leaf("non-sealed", @1); }
 ;
+// 修饰符列表。
 Modifiers:
     Modifier {
         $$ = make_list_node(AST_MODIFIER_LIST, @$);
@@ -817,44 +1189,60 @@ Modifiers:
     }
 ;
 
-// 以下4条语法是专门为 Modifier 服务的 Annotation
+// 以下 4 条语法是专门为 Modifier 服务的 Annotation。
+// 作为修饰符使用的注解三种形态。
 Annotation_Modifier:
     NormalAnnotation_Modifier { $$ = $1; }
     | MarkerAnnotation_Modifier { $$ = $1; }
     | SingleElementAnnotation_Modifier { $$ = $1; }
 ;
 
+// 普通注解作为修饰符的形式。
 NormalAnnotation_Modifier:
     AT_Modifier TypeName_ModifierOrDims '(' ElementValuePairList ')' {
         AstNode *node = make_annotation_node($2, @1);
         ast_add_child(node, $4);
-        $$ = node;
+        AstNode *list = make_list_node(AST_ANNOTATION_LIST, @$);
+        ast_add_child(list, node);
+        $$ = list;
     }
     | AT_Modifier TypeName_ModifierOrDims '(' ')' {
-        $$ = make_annotation_node($2, @1);
+        AstNode *node = make_annotation_node($2, @1);
+        AstNode *list = make_list_node(AST_ANNOTATION_LIST, @$);
+        ast_add_child(list, node);
+        $$ = list;
     }
 ;
 
+// 标记注解作为修饰符的形式。
 MarkerAnnotation_Modifier:
     AT_Modifier TypeName {
-        $$ = make_annotation_node($2, @1);
+        AstNode *node = make_annotation_node($2, @1);
+        AstNode *list = make_list_node(AST_ANNOTATION_LIST, @$);
+        ast_add_child(list, node);
+        $$ = list;
     }
 ;
 
+// 单元素注解作为修饰符的形式。
 SingleElementAnnotation_Modifier:
     AT_Modifier TypeName_ModifierOrDims '(' ElementValue ')' {
         AstNode *node = make_annotation_node($2, @1);
         AstNode *args = make_list_node(AST_ARGUMENT_LIST, @$);
         ast_add_child(args, $4);
         ast_add_child(node, args);
-        $$ = node;
+        AstNode *list = make_list_node(AST_ANNOTATION_LIST, @$);
+        ast_add_child(list, node);
+        $$ = list;
     }
 ;
 
+// 修饰符注解中允许的类型名/带限定名。
 TypeName_ModifierOrDims:
     TYPE_IDENTIFIER_MethodDeclarator { $$ = $1; }
   | CommonName DOT_CommonName TYPE_IDENTIFIER_MethodDeclarator {
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
         ast_add_child(node, $3);
         $$ = node;
@@ -863,31 +1251,38 @@ TypeName_ModifierOrDims:
 
 
 //-------------------Types, Values, and Variables-----------------------
-
-
+// 类型、值与变量：字面量、类型、注解、修饰符、变量/参数等。
 /*
+// 类型入口：基本类型或引用类型。
 Type:
     PrimitiveType
   | ReferenceType
 ;
 */
 
-// 这里把 PrimitiveType 缩减定义为必须被一个或多个 Annotation 修饰的 NumericType 或 BOOLEAN ，然后在以下所有用到的 PrimitiveType 的地方都加入了替换为 UnannPrimitiveType 的新定义以保证语法正确
+// 这里将 PrimitiveType 缩减为必须被一个或多个 Annotation 修饰的 NumericType 或 BOOLEAN，然后在以下所有用到 PrimitiveType 的地方替换为 UnannPrimitiveType 以保证语法正确。
+// 基本类型：数值/布尔。
 PrimitiveType:
 //    Annotations NumericType
 //    | Annotations BOOLEAN
     Annotations UnannPrimitiveType {
-        $$ = make_type_node($2, @$);
+        AstNode *type = make_type_node($2, @$);
+        if ($1) {
+            ast_prepend_child(type, $1);
+        }
+        $$ = type;
     }
 //    | NumericType
 //    | BOOLEAN
 ;
 
+// 数值类型入口（整型/浮点）。
 NumericType:
     IntegralType { $$ = $1; }
   | FloatingPointType { $$ = $1; }
 ;
 
+// 整型/字符类型。
 IntegralType:
     BYTE { $$ = make_keyword_leaf("byte", @1); }
   | SHORT { $$ = make_keyword_leaf("short", @1); }
@@ -896,12 +1291,14 @@ IntegralType:
   | CHAR { $$ = make_keyword_leaf("char", @1); }
 ;
 
+// 浮点类型。
 FloatingPointType:
     FLOAT { $$ = make_keyword_leaf("float", @1); }
   | DOUBLE { $$ = make_keyword_leaf("double", @1); }
 ;
 
-// 因 ClassOrInterfaceType 中实际包括 TypeVariable 的具体语法，故而此处将原定义中的 TypeVariable 去掉
+// 原 ClassOrInterfaceType 中实际包含 TypeVariable 的具体语法，这里将原定义中的 TypeVariable 去掉。
+// 引用类型：类/接口/数组。
 ReferenceType:
     ClassOrInterfaceType { $$ = $1; }
 //  | TypeVariable
@@ -909,24 +1306,33 @@ ReferenceType:
 //    | UnannArrayType
 ;
 
-// ClassOrInterfaceType ClassType InterfaceType 合并， Annotations TYPE_IDENTIFIER 替换为 TypeVariable
+// 将 ClassOrInterfaceType/ClassType/InterfaceType 合并，使用 Annotations TYPE_IDENTIFIER 替换 TypeVariable。
 /* 
-这样定义实际上在扩宽语义哈
+这样定义实际上在扩宽语义。
 因为 ClassOrInterfaceType: Annotations PackageName . {Annotation} TypeIdentifier [TypeArguments] 不应该规约成 ClassOrInterfaceType
 */
+// 类或接口类型（含类型实参）。
 ClassOrInterfaceType:
     UnannClassOrInterfaceType {
         $$ = make_type_node($1, @$);
     }
     | Annotations UnannClassOrInterfaceType {
-        $$ = make_type_node($2, @$);
+        AstNode *type = make_type_node($2, @$);
+        if ($1) {
+            ast_prepend_child(type, $1);
+        }
+        $$ = type;
     }
 ;
 
-// 因为在 ClassOrInterfaceType 中实际包括一个语法上的 TypeVariable ，则实际在语法上 TypeVariable Dims 与 ClassOrInterfaceType Dims 有一定重叠，故删去
+// 因为 ClassOrInterfaceType 中实际包含语法上的 TypeVariable，则 TypeVariable Dims 与 ClassOrInterfaceType Dims 有一定重叠，故删除。
+// 数组类型：元素类型 + 维度。
 ArrayType:
     Annotations UnannPrimitiveType Dims {
         AstNode *type = make_type_node($2, @$);
+        if ($1) {
+            ast_prepend_child(type, $1);
+        }
         if ($3) {
             ast_add_child(type, $3);
         }
@@ -934,6 +1340,9 @@ ArrayType:
     }
     | Annotations UnannClassOrInterfaceType Dims {
         AstNode *type = make_type_node($2, @$);
+        if ($1) {
+            ast_prepend_child(type, $1);
+        }
         if ($3) {
             ast_add_child(type, $3);
         }
@@ -944,6 +1353,7 @@ ArrayType:
     }
 ;
 
+// 数组维度列表（可带注解）。
 Dims:
     Annotations_Dims '[' ']' {
         AstNode *list = make_list_node(AST_DIM_LIST, @$);
@@ -974,7 +1384,7 @@ Dims:
     }
 ;
 
-// 以下五条语法是专门为 Dims 服务的 Annotations
+// 以下五条语法是专门为 Dims 服务的 Annotations。
 Annotation_Dims:
     NormalAnnotation_Dims { $$ = $1; }
     | MarkerAnnotation_Dims { $$ = $1; }
@@ -988,11 +1398,12 @@ Annotations_Dims:
         $$ = $1;
     }
     | Annotation_Dims {
-        $$ = make_list_node(AST_MODIFIER_LIST, @$);
+        $$ = make_list_node(AST_ANNOTATION_LIST, @$);
         ast_add_child($$, $1);
     }
 ;
 
+// 维度上的普通注解。
 NormalAnnotation_Dims:
     AT_Dims TypeName_ModifierOrDims '(' ElementValuePairList ')' {
         AstNode *node = make_annotation_node($2, @1);
@@ -1004,12 +1415,14 @@ NormalAnnotation_Dims:
     }
 ;
 
+// 维度上的标记注解。
 MarkerAnnotation_Dims:
     AT_Dims TypeName {
         $$ = make_annotation_node($2, @1);
     }
 ;
 
+// 维度上的单元素注解。
 SingleElementAnnotation_Dims:
     AT_Dims TypeName_ModifierOrDims '(' ElementValue ')' {
         AstNode *node = make_annotation_node($2, @1);
@@ -1020,13 +1433,21 @@ SingleElementAnnotation_Dims:
     }
 ;
 
-// TypeParameterModifier 纯粹由 Annotation 构成，故而这里把 TypeParameterModifier 直接替换为了 Annotation
+// TypeParameterModifier 纯粹由 Annotation 构成，故而这里把 TypeParameterModifier 直接替换为 Annotation。
 TypeParameter:
     Annotations TYPE_IDENTIFIER {
-        $$ = make_type_parameter_node($2, NULL, @$);
+        AstNode *node = make_type_parameter_node($2, NULL, @$);
+        if ($1) {
+            ast_prepend_child(node, $1);
+        }
+        $$ = node;
     }
     | Annotations TYPE_IDENTIFIER TypeBound {
-        $$ = make_type_parameter_node($2, $3, @$);
+        AstNode *node = make_type_parameter_node($2, $3, @$);
+        if ($1) {
+            ast_prepend_child(node, $1);
+        }
+        $$ = node;
     }
     | TYPE_IDENTIFIER {
         $$ = make_type_parameter_node($1, NULL, @$);
@@ -1036,25 +1457,20 @@ TypeParameter:
     }
 ;
 
+// 泛型上界/下界约束。
 TypeBound:
     EXTENDS ClassOrInterfaceType AdditionalBounds {
-        if ($3) {
-            ast_prepend_child($3, $2);
-            $$ = $3;
-        } else {
-            $$ = make_list_node(AST_ARGUMENT_LIST, @$);
-            ast_add_child($$, $2);
-        }
+        $$ = make_type_bound_node("extends", $2, $3, @$);
     }
 ;
 
-// 这里允许 AdditionalBounds 为空，这是我代码中极少数允许为空的
+// 这里允许 AdditionalBounds 为空，这是代码中极少数允许为空的地方。
 AdditionalBounds:
 //    AMPERSAND ClassOrInterfaceType
     AdditionalBounds AMPERSAND ClassOrInterfaceType {
         AstNode *list = $1;
         if (!list) {
-            list = make_list_node(AST_ARGUMENT_LIST, @$);
+            list = make_list_node(AST_ADDITIONAL_BOUNDS, @$);
         }
         ast_add_child(list, $3);
         $$ = list;
@@ -1062,19 +1478,22 @@ AdditionalBounds:
     |  { $$ = NULL; }
 ;
 
+// 泛型实参列表：<String, ? extends ...>。
 TypeArguments:
     '<' TypeArgumentList '>' { $$ = $2; }
     | LANGLE TypeArgumentList '>' { $$ = $2; }
 ;
 
+// 未注解类/接口类型中的泛型实参。
 TypeArguments_UnannClassOrInterfaceType:
 //    '<' TypeArgumentList '>'
     LANGLE TypeArgumentList '>' { $$ = $2; }
 ;
 
+// 类型实参列表。
 TypeArgumentList:
     TypeArgument {
-        $$ = make_list_node(AST_ARGUMENT_LIST, @$);
+        $$ = make_list_node(AST_TYPE_ARGUMENT_LIST, @$);
         ast_add_child($$, $1);
     }
     | TypeArgumentList ',' TypeArgument {
@@ -1083,63 +1502,47 @@ TypeArgumentList:
     }
 ;
 
+// 单个类型实参。
 TypeArgument:
     ReferenceType {
-        $$ = make_type_argument_node($1, @$);
+        $$ = make_type_argument_type_node($1, @$);
     }
   | Wildcard {
-        $$ = make_type_argument_node($1, @$);
+        $$ = make_type_argument_wildcard_node($1, @$);
     }
 ;
 
+// 通配符类型参数。
 Wildcard:
     Annotations '?' WildcardBounds {
-        AstNode *node = make_type_node(make_keyword_leaf("?", @2), @$);
-        if ($3) {
-            ast_add_child(node, $3);
-        }
-        $$ = node;
+        $$ = make_wildcard_node($1, $3, @$);
     }
   | Annotations '?' {
-        $$ = make_type_node(make_keyword_leaf("?", @2), @$);
+        $$ = make_wildcard_node($1, NULL, @$);
     }
   | '?' WildcardBounds {
-        AstNode *node = make_type_node(make_keyword_leaf("?", @1), @$);
-        if ($2) {
-            ast_add_child(node, $2);
-        }
-        $$ = node;
+        $$ = make_wildcard_node(NULL, $2, @$);
     }
   | '?' {
-        $$ = make_type_node(make_keyword_leaf("?", @1), @$);
+        $$ = make_wildcard_node(NULL, NULL, @$);
     }
 ;
 
+// 通配符边界（extends/super）。
 WildcardBounds:
-    EXTENDS ReferenceType AdditionalBounds {
-        AstNode *types;
-        if ($3) {
-            ast_prepend_child($3, $2);
-            types = $3;
-        } else {
-            types = make_list_node(AST_ARGUMENT_LIST, @$);
-            ast_add_child(types, $2);
-        }
-        AstNode *node = make_list_node(AST_ARGUMENT_LIST, @$);
-        ast_add_child(node, make_keyword_leaf("extends", @1));
-        ast_add_child(node, types);
-        $$ = node;
+    EXTENDS ReferenceType {
+        AstNode *bound = make_type_bound_node("extends", $2, NULL, @$);
+        $$ = make_wildcard_bound_node("extends", bound, @1);
     }
   | SUPER ReferenceType {
-        AstNode *node = make_list_node(AST_ARGUMENT_LIST, @$);
-        ast_add_child(node, make_keyword_leaf("super", @1));
-        ast_add_child(node, $2);
-        $$ = node;
+        AstNode *bound = make_type_bound_node("super", $2, NULL, @$);
+        $$ = make_wildcard_bound_node("super", bound, @1);
     }
 ;
 
 
 //-------------------------------Names------------------------------
+// 名称相关：包名、类型名、点分名称等。
 
 
 // 模块名称
@@ -1153,11 +1556,13 @@ ModuleName:
     | ModuleName DOT_CommonName TYPE_IDENTIFIER {
         AstNode *children[] = { $1, $3 };
         $$ = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        $$->scope = $1;
         ast_add_children($$, children, 2);
     }
     | ModuleName DOT_CommonName IdentifierComplement {
         AstNode *children[] = { $1, $3 };
         $$ = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        $$->scope = $1;
         ast_add_children($$, children, 2);
     }
 ;
@@ -1174,15 +1579,18 @@ ModuleNames:
     }
 ;
 
+// 类型名称（可带限定前缀）。
 TypeName:
     TYPE_IDENTIFIER { $$ = $1; }
   | CommonName DOT_CommonName TYPE_IDENTIFIER {
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
         ast_add_child(node, $3);
         $$ = node;
     }
 ;
+// 类型名称列表。
 TypeNames:
     TypeName {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -1200,15 +1608,17 @@ TypeNames:
 
 /*
    ExpressionName PackageOrTypeName AmbiguousName PackageName 
-   如上四条合并为 CommonName
-   有点地方好像还掺杂一点 ModuleName
+   如上四条合并?CommonName
+   有点地方好像还掺杂一?ModuleName
 */
 /*
+// 通用点分名称（表达式名/包名/类型名公用）。
 CommonName:
     IDENTIFIER
     | CommonName '.' IDENTIFIER
 ;
 */
+// 通用点分名称（表达式名/包名/类型名公用）。
 CommonName:
     TYPE_IDENTIFIER {
         $$ = $1;
@@ -1219,21 +1629,21 @@ CommonName:
     | CommonName DOT_CommonName TYPE_IDENTIFIER {
         AstNode *children[] = { $1, $3 };
         $$ = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        $$->scope = $1;
         ast_add_children($$, children, 2);
     }
     | CommonName DOT_CommonName IdentifierComplement {
         AstNode *children[] = { $1, $3 };
         $$ = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        $$->scope = $1;
         ast_add_children($$, children, 2);
     }
 ;
 
 
 //----------------------------Packages and Modules-----------------------------
-
-
-
-// 根规则：编译单元
+// 包与模块：package/import/module 声明及其指令。
+// 根规则：编译单元。
 CompilationUnit:
     OrdinaryCompilationUnit { $$ = $1; root_ast = $$; }
   | ModularCompilationUnit {
@@ -1242,29 +1652,27 @@ CompilationUnit:
     }
 ;
 
-// 普通编译单元
-// 普通编译单元：固定 3 子节点 (package?, imports, types)
+// 普通编译单元。
+// 普通编译单元：固定 3 个子节点（package, imports, types）。
 OrdinaryCompilationUnit:
     PackageDeclaration ImportDeclarations TypeDeclarations {
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, $1, $2, $3);
     }
   | ImportDeclarations TypeDeclarations {
-        AstNode *empty_pkg = make_default_package_node(@$);
-        $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, empty_pkg, $1, $2);
+        $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 2, $1, $2);
     }
   | PackageDeclaration TypeDeclarations {
         AstNode *empty_imports = AST_EMPTY_NODE(AST_IMPORT_LIST, @$);
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, $1, empty_imports, $2);
     }
   | TypeDeclarations {
-        AstNode *empty_pkg = make_default_package_node(@$);
         AstNode *empty_imports = AST_EMPTY_NODE(AST_IMPORT_LIST, @$);
-        $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 3, empty_pkg, empty_imports, $1);
+        $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @$, 2, empty_imports, $1);
     }
 ;
 
 
-// 模块编译单元
+// 模块编译单元。
 ModularCompilationUnit:
     ImportDeclarations ModuleDeclaration {
         $$ = AST_BRANCH_AT(AST_COMPILATION_UNIT, @1, 2, $1, $2);
@@ -1274,19 +1682,21 @@ ModularCompilationUnit:
     }
 ;
 
-// 包声明：包修改符 PackageModifier 完全由 Annotation 构成，故而这里把 PackageModifier 直接替换为了 Annotation
+// 包声明：包修饰符 PackageModifier 完全由 Annotation 构成，故而这里把 PackageModifier 直接替换为 Annotation。
+// package 声明（可选，默认包）。
 PackageDeclaration:
     Annotations PACKAGE CommonName ';' {
         $$ = AST_BRANCH_AT(AST_PACKAGE_DECL, @2, 2, $1, $3);
     }
   | PACKAGE CommonName ';' {
-        AstNode *empty_ann = make_list_node(AST_ANNOTATION, @$);   // 与你 Annotations 的 list kind 保持一致
+        AstNode *empty_ann = make_list_node(AST_ANNOTATION_LIST, @$);   // 与 Annotations 的 list kind 保持一致。
         $$ = AST_BRANCH_AT(AST_PACKAGE_DECL, @1, 2, empty_ann, $2);
     }
 ;
 
 
-// 导入声明
+// 导入声明列表。
+// import 列表（普通/静态/按需）。
 ImportDeclarations:
     ImportDeclaration {
         $$ = AST_BRANCH_AT(AST_IMPORT_LIST, @$, 1, $1);
@@ -1297,6 +1707,7 @@ ImportDeclarations:
     }
 ;
 
+// import 声明入口（单条）。
 ImportDeclaration:
     SingleTypeImportDeclaration          { $$ = $1; }
   | TypeImportOnDemandDeclaration        { $$ = $1; }
@@ -1304,22 +1715,22 @@ ImportDeclaration:
   | StaticImportOnDemandDeclaration      { $$ = $1; }
 ;
 
-// 单一类型导入声明
+// 单一类型导入声明。
 SingleTypeImportDeclaration:
     IMPORT TypeName ';' {
         $$ = make_import_node(false, false, $2, @1);
     }
 ;
 
-// 类型导入请求
+// 按需类型导入声明。
 TypeImportOnDemandDeclaration:
     IMPORT CommonName '.' '*' ';' {
         $$ = make_import_node(false, true, $2, @1);
     }
 ;
 
-// 单一静态导入声明
-// 这里为了避免冲突把 TypeName 换成了 CommonName ，实际上扩大了语义，后续可升级
+// 单一静态导入声明。
+// 这里为避免冲突将 TypeName 换成 CommonName，实际上扩大了语义，后续可升级。
 SingleStaticImportDeclaration:
 //   IMPORT STATIC TypeName '.' TYPE_IDENTIFIER ';'
 //    | IMPORT STATIC TypeName '.' IdentifierComplement ';'
@@ -1328,8 +1739,8 @@ SingleStaticImportDeclaration:
     }
 ;
 
-// 静态导入请求
-// 这里为了避免冲突把 TypeName 换成了 CommonName ，实际上扩大了语义，后续可升级
+// 静态按需导入声明。
+// 这里为避免冲突将 TypeName 换成 CommonName，实际上扩大了语义，后续可升级。
 StaticImportOnDemandDeclaration:
 //    IMPORT STATIC TypeName '.' '*' ';'
     IMPORT STATIC CommonName '.' '*' ';' {
@@ -1337,7 +1748,7 @@ StaticImportOnDemandDeclaration:
     }
 ;
 
-// 类型声明
+// 类型声明列表。
 TypeDeclarations:
     TypeDeclaration {
         $$ = AST_BRANCH_AT(AST_TYPE_DECL_LIST, @$, 1, $1);
@@ -1349,6 +1760,7 @@ TypeDeclarations:
 ;
 
 
+// 类型声明入口。
 TypeDeclaration:
     ClassDeclaration { $$ = $1; }
     | InterfaceDeclaration { $$ = $1; }
@@ -1356,7 +1768,8 @@ TypeDeclaration:
     | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
-// 模块声明
+// 模块声明。
+// module 声明与指令块。
 ModuleDeclaration:
     Annotations OPEN MODULE CommonName '{' ModuleDirectives '}' {
         YYLTYPE open_loc = @2;
@@ -1388,7 +1801,7 @@ ModuleDeclaration:
     }
 ;
 
-// 模块指令
+// 模块指令列表。
 ModuleDirectives:
     ModuleDirective {
         $$ = AST_BRANCH_AT(AST_STATEMENT_LIST, @1, 1, $1);
@@ -1397,59 +1810,60 @@ ModuleDirectives:
         ast_add_child($1, $2);
         $$ = $1;
     }
-//  | /*空*/
+//  | /*/
 ;
 
-// 这里把原 ModuleDirective 中的 RequiresModifier 替换为了由 TRANSITIVE 和 STATIC 及其排列组合
+// 这里把原 ModuleDirective 中的 RequiresModifier 替换为 TRANSITIVE/STATIC 及其排列组合。
+// module 指令：requires/exports/opens/uses/provides。
 ModuleDirective:
     REQUIRES TRANSITIVE ModuleName ';' {
-        AstNode *node = make_module_directive_node("requires", @1);
+        AstNode *node = make_module_directive_node(AST_REQUIRES_DIRECTIVE, @1);
         ast_add_child(node, make_keyword_leaf("transitive", @2));
         ast_add_child(node, $3);
         $$ = node;
     }
     | REQUIRES ModuleName ';' {
-        AstNode *node = make_module_directive_node("requires", @1);
+        AstNode *node = make_module_directive_node(AST_REQUIRES_DIRECTIVE, @1);
         ast_add_child(node, $2);
         $$ = node;
     }
     | REQUIRES STATIC ModuleName ';' {
-        AstNode *node = make_module_directive_node("requires", @1);
+        AstNode *node = make_module_directive_node(AST_REQUIRES_DIRECTIVE, @1);
         ast_add_child(node, make_keyword_leaf("static", @2));
         ast_add_child(node, $3);
         $$ = node;
     }
     | EXPORTS CommonName ';' {
-        AstNode *node = make_module_directive_node("exports", @1);
+        AstNode *node = make_module_directive_node(AST_EXPORTS_DIRECTIVE, @1);
         ast_add_child(node, $2);
         $$ = node;
     }
     | EXPORTS CommonName TO ModuleNames ';' {
-        AstNode *node = make_module_directive_node("exports", @1);
+        AstNode *node = make_module_directive_node(AST_EXPORTS_DIRECTIVE, @1);
         ast_add_child(node, $2);
         ast_add_child(node, make_keyword_leaf("to", @3));
         ast_add_child(node, $4);
         $$ = node;
     }
     | OPENS CommonName ';' {
-        AstNode *node = make_module_directive_node("opens", @1);
+        AstNode *node = make_module_directive_node(AST_OPENS_DIRECTIVE, @1);
         ast_add_child(node, $2);
         $$ = node;
     }
     | OPENS CommonName TO ModuleNames ';' {
-        AstNode *node = make_module_directive_node("opens", @1);
+        AstNode *node = make_module_directive_node(AST_OPENS_DIRECTIVE, @1);
         ast_add_child(node, $2);
         ast_add_child(node, make_keyword_leaf("to", @3));
         ast_add_child(node, $4);
         $$ = node;
     }
     | USES TypeName ';' {
-        AstNode *node = make_module_directive_node("uses", @1);
+        AstNode *node = make_module_directive_node(AST_USES_DIRECTIVE, @1);
         ast_add_child(node, $2);
         $$ = node;
     }
     | PROVIDES TypeName WITH TypeNames ';' {
-        AstNode *node = make_module_directive_node("provides", @1);
+        AstNode *node = make_module_directive_node(AST_PROVIDES_DIRECTIVE, @1);
         ast_add_child(node, $2);
         ast_add_child(node, make_keyword_leaf("with", @3));
         ast_add_child(node, $4);
@@ -1459,9 +1873,11 @@ ModuleDirective:
 
 
 //------------------------Arrays------------------------------------
+// 数组相关：数组类型、数组初始化与维度表达式。
 
 
-//数组初始化器
+// 数组初始化器。
+// 数组初始化器：{ ... }。
 ArrayInitializer:
     '{' VariableInitializerList '}' {
         $$ = make_array_initializer_node($2, @1);
@@ -1475,7 +1891,7 @@ ArrayInitializer:
     }
 ;
 
-//变量初始化器的列表
+// 变量初始化器列表。
 VariableInitializerList:
     VariableInitializer {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -1490,13 +1906,16 @@ VariableInitializerList:
 
 
 //-------------------------------Classes--------------------------------
+// 类相关：类声明、成员、构造器、枚举等。
 
 
+// 类声明入口：普通类或枚举。
 ClassDeclaration:
     NormalClassDeclaration { $$ = $1; }
     | EnumDeclaration { $$ = $1; }
 ;
 
+// 普通类声明。
 NormalClassDeclaration:
     Modifiers CLASS TYPE_IDENTIFIER OptTypeParameters OptSuperclass OptSuperinterfaces OptClassOrInterfacePermits ClassBody {
         /* 参数顺序对应修改后的 make_class_basic */
@@ -1520,34 +1939,40 @@ NormalClassDeclaration:
                               $7);
     }
 ;
+// 可选泛型形参。
 OptTypeParameters:
     TypeParameters { $$ = $1; }
     | /* empty */ { $$ = NULL; }
 ;
 
+// 可选父类。
 OptSuperclass:
     Superclass { $$ = $1; }
     | /* empty */ { $$ = NULL; }
 ;
 
+// 可选接口列表。
 OptSuperinterfaces:
     Superinterfaces { $$ = $1; }
     | /* empty */ { $$ = NULL; }
 ;
 
+// 可选 permits 列表。
 OptClassOrInterfacePermits:
     ClassOrInterfacePermits { $$ = $1; }
     | /* empty */ { $$ = NULL; }
 ;
 
+// 泛型形参列表：<T, U extends ...>。
 TypeParameters:
     '<' TypeParameterList '>'  { $$ = $2; }
   | LANGLE TypeParameterList '>' { $$ = $2; }
 ;
 
+// 泛型形参项列表。
 TypeParameterList:
     TypeParameter {
-        $$ = make_list_node(AST_ARGUMENT_LIST, @$);
+        $$ = make_list_node(AST_TYPE_PARAMETER_LIST, @$);
         ast_add_child($$, $1);
     }
   | TypeParameterList ',' TypeParameter {
@@ -1557,22 +1982,21 @@ TypeParameterList:
 ;
 
 
+// extends 父类。
 Superclass:
     EXTENDS ClassOrInterfaceType {
-        $$ = make_list_node(AST_ARGUMENT_LIST, @$);
-        ast_add_child($$, make_keyword_leaf("extends", @1));
-        ast_add_child($$, $2);
+        $$ = $2;
     }
 ;
 
+// implements 接口列表。
 Superinterfaces:
     IMPLEMENTS InterfaceTypeList {
-        $$ = make_list_node(AST_ARGUMENT_LIST, @$);
-        ast_add_child($$, make_keyword_leaf("implements", @1));
-        ast_add_child($$, $2);
+        $$ = $2;
     }
 ;
 
+// 接口类型列表。
 InterfaceTypeList:
     ClassOrInterfaceType {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -1584,10 +2008,12 @@ InterfaceTypeList:
     }
 ;
 
+// permits 类型列表。
 ClassOrInterfacePermits:
-    PERMITS TypeNames
+    PERMITS TypeNames { $$ = $2; }
 ;
 
+// 类体与成员声明列表。
 ClassBody:
     '{' ClassBodyDeclarationList '}' { $$ = $2; }
     | '{' '}' { $$ = ast_branch(AST_BLOCK, @1.first_line, @1.first_column, 0); }
@@ -1604,6 +2030,7 @@ ClassBodyDeclarationList:
     }
 ;
 
+// 类体单条声明。
 ClassBodyDeclaration:
     ClassMemberDeclaration { $$ = $1; }
     | InstanceInitializer { $$ = $1; }
@@ -1611,6 +2038,7 @@ ClassBodyDeclaration:
     | ConstructorDeclaration { $$ = $1; }
 ;
 
+// 类成员：字段/方法/构造器/初始化块/嵌套类型。
 ClassMemberDeclaration:
     FieldDeclaration { $$ = $1; }
     | MethodDeclaration { $$ = $1; }
@@ -1619,6 +2047,7 @@ ClassMemberDeclaration:
     | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
+// 字段声明。
 FieldDeclaration:
     Modifiers UnannType VariableDeclaratorList ';' {
         $$ = make_field_node($1, $2, $3, @2);
@@ -1632,9 +2061,10 @@ FieldDeclaration:
 
 
 
+// 变量声明列表。
 VariableDeclaratorList:
     VariableDeclarator {
-        $$ = make_list_node(AST_STATEMENT_LIST, @$);
+        $$ = make_list_node(AST_VAR_DECL_LIST, @$);
         ast_add_child($$, $1);
     }
     | VariableDeclaratorList ',' VariableDeclarator {
@@ -1643,6 +2073,7 @@ VariableDeclaratorList:
     }
 ;
 
+// 变量声明项。
 VariableDeclarator:
     VariableDeclaratorId '=' VariableInitializer {
         AstNode *node = ast_branch(AST_VARIABLE_DECL, @1.first_line, @1.first_column, 0);
@@ -1659,6 +2090,7 @@ VariableDeclarator:
     }
 ;
 
+// 变量名与数组维度。
 VariableDeclaratorId:
     TYPE_IDENTIFIER Dims {
         if ($2) {
@@ -1676,6 +2108,7 @@ VariableDeclaratorId:
     | IdentifierComplement { $$ = $1; }
 ;
 
+// 变量初始化器（表达式或数组初始化器）。
 VariableInitializer:
     Expression {
         $$ = $<node>1;
@@ -1685,12 +2118,13 @@ VariableInitializer:
     }
 ;
 
+// 未注解类型入口。
 UnannType:
-    UnannReferenceType { $$ = $1; }
-    | UnannPrimitiveType { $$ = $1; }
+    UnannReferenceType { $$ = make_type_node($1, @$); }
+    | UnannPrimitiveType { $$ = make_type_node($1, @$); }
 ;
 
-// 将 FloatingPointType IntegralType NumericType UnannPrimitiveType 合并
+// ?FloatingPointType IntegralType NumericType UnannPrimitiveType 合并
 UnannPrimitiveType:
 //    BYTE
 //    | SHORT
@@ -1704,20 +2138,24 @@ UnannPrimitiveType:
     | BOOLEAN { $$ = make_keyword_leaf("boolean", @1); }
 ;
 
-// UnannClassOrInterfaceType 中实际包括 UnannTypeVariable ，这里予以去除
+// UnannClassOrInterfaceType 中实际包?UnannTypeVariable ，这里予以去?
 UnannReferenceType:
-    UnannArrayType { $$ = $1; }    //结尾是']'
+    UnannArrayType { $$ = $1; }    //结尾?]'
 //    | UnannTypeVariable
     | UnannClassOrInterfaceType { $$ = $1; }
 ;
 
-// UnannClassOrInterfaceType、UnannClassType、UnannInterfaceType 合并在一起
+// UnannClassOrInterfaceType、UnannClassType、UnannInterfaceType 合并在一?
 /*
-   请注意，这里用 CommonName 替代 TypeName 替代原 UnannClassOrInterfaceType: TYPE_IDENTIFIER 和原 UnannClassOrInterfaceType: PackageName . TypeIdentifier 的行为
+   请注意，这里?CommonName 替代 TypeName 替代?UnannClassOrInterfaceType: TYPE_IDENTIFIER 和原 UnannClassOrInterfaceType: PackageName . TypeIdentifier 的行?
    实际上扩宽了语义
 */
+// 未注解类或接口类型。
 UnannClassOrInterfaceType:
     TYPE_IDENTIFIER TypeArguments_UnannClassOrInterfaceType {
+        if ($2) {
+            ast_add_child($1, $2);
+        }
         $$ = $1;
     }
     | CommonName { $$ = $1; }
@@ -1725,53 +2163,104 @@ UnannClassOrInterfaceType:
 //    | TYPE_IDENTIFIER '.' TYPE_IDENTIFIER
 //    | IdentifierComplement '.' TYPE_IDENTIFIER
     | CommonName '.' Annotations TYPE_IDENTIFIER {
+        AstNode *member = $4;
+        if ($3) {
+            ast_prepend_child(member, $3);
+        }
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
-        ast_add_child(node, $4);
+        ast_add_child(node, member);
         $$ = node;
     }
     | CommonName '.' Annotations TYPE_IDENTIFIER TypeArguments_UnannClassOrInterfaceType {
+        AstNode *member = $4;
+        if ($3) {
+            ast_prepend_child(member, $3);
+        }
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
-        ast_add_child(node, $4);
+        ast_add_child(node, member);
+        if ($5) {
+            ast_add_child(node, $5);
+        }
         $$ = node;
     }
     | CommonName DOT_CommonName TYPE_IDENTIFIER TypeArguments_UnannClassOrInterfaceType {
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
         ast_add_child(node, $3);
+        if ($4) {
+            ast_add_child(node, $4);
+        }
         $$ = node;
     }
 //    | UnannClassOrInterfaceType '.' TYPE_IDENTIFIER
     | UnannClassOrInterfaceType DOT TYPE_IDENTIFIER TypeArguments_UnannClassOrInterfaceType {
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
         ast_add_child(node, $3);
+        if ($4) {
+            ast_add_child(node, $4);
+        }
         $$ = node;
     }
     | UnannClassOrInterfaceType DOT Annotations TYPE_IDENTIFIER {
+        AstNode *member = $4;
+        if ($3) {
+            ast_prepend_child(member, $3);
+        }
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
-        ast_add_child(node, $4);
+        ast_add_child(node, member);
         $$ = node;
     }
     | UnannClassOrInterfaceType DOT Annotations TYPE_IDENTIFIER TypeArguments_UnannClassOrInterfaceType {
+        AstNode *member = $4;
+        if ($3) {
+            ast_prepend_child(member, $3);
+        }
         AstNode *node = AST_EMPTY_NODE(AST_MEMBER_ACCESS, @$);
+        node->scope = $1;
         ast_add_child(node, $1);
-        ast_add_child(node, $4);
+        ast_add_child(node, member);
+        if ($5) {
+            ast_add_child(node, $5);
+        }
         $$ = node;
     }
 ;
 
-// UnannClassOrInterfaceType 中实际包括 UnannTypeVariable ，这里予以去除
+// UnannClassOrInterfaceType 中实际包?UnannTypeVariable ，这里予以去?
 UnannArrayType:
-    UnannPrimitiveType Dims { $$ = $1; }
-    | UnannClassOrInterfaceType Dims { $$ = $1; }
+    UnannPrimitiveType Dims {
+        AstNode *type = make_type_node($1, @$);
+        if ($2) {
+            ast_add_child(type, $2);
+        }
+        $$ = type;
+    }
+    | UnannClassOrInterfaceType Dims {
+        AstNode *type = make_type_node($1, @$);
+        if ($2) {
+            ast_add_child(type, $2);
+        }
+        $$ = type;
+    }
 //    | UnannTypeVariable Dims
 ;
 
+// 方法声明。
 MethodDeclaration:
     Modifiers MethodHeader MethodBody {
+        move_trailing_type_annotations($1, $2);
+        if ($1 && $1->child_count > 0) {
+            ast_prepend_child($2, $1);
+        }
         if ($3) {
             ast_add_child($2, $3);
         }
@@ -1785,6 +2274,7 @@ MethodDeclaration:
     }
 ;
 
+// 方法头：修饰符/类型/名称/参数/throws。
 MethodHeader:
     Result MethodDeclarator Throws {
         if ($1) {
@@ -1802,8 +2292,14 @@ MethodHeader:
         $$ = $2;
     }
     | TypeParameters Annotations Result MethodDeclarator Throws {
+        if ($3 && $2) {
+            ast_prepend_child($3, $2);
+        }
         if ($3) {
             ast_prepend_child($4, $3);
+        }
+        if ($1) {
+            ast_prepend_child($4, $1);
         }
         if ($5) {
             ast_add_child($4, $5);
@@ -1811,14 +2307,23 @@ MethodHeader:
         $$ = $4;
     }
     | TypeParameters Annotations Result MethodDeclarator {
+        if ($3 && $2) {
+            ast_prepend_child($3, $2);
+        }
         if ($3) {
             ast_prepend_child($4, $3);
+        }
+        if ($1) {
+            ast_prepend_child($4, $1);
         }
         $$ = $4;
     }
     | TypeParameters Result MethodDeclarator Throws {
         if ($2) {
             ast_prepend_child($3, $2);
+        }
+        if ($1) {
+            ast_prepend_child($3, $1);
         }
         if ($4) {
             ast_add_child($3, $4);
@@ -1829,21 +2334,28 @@ MethodHeader:
         if ($2) {
             ast_prepend_child($3, $2);
         }
+        if ($1) {
+            ast_prepend_child($3, $1);
+        }
         $$ = $3;
     }
 ;
 
+// 方法返回类型（类型/void）。
 Result:
     UnannType { $$ = $1; }
-    | VOID { $$ = make_keyword_leaf("void", @1); }
+    | VOID { $$ = make_type_node(make_keyword_leaf("void", @1), @1); }
 ;
 
+// 方法声明子句：名称与参数列表。
 MethodDeclarator:
     IDENTIFIER_MethodDeclarator '(' ReceiverParameter ',' FormalParameterList ')' Dims {
-        $$ = make_method_signature($1, $5, @$);
+        AstNode *params = $5 ? $5 : make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_prepend_child(params, $3);
+        $$ = make_method_signature($1, params, @$);
     }
     | IDENTIFIER_MethodDeclarator '(' ReceiverParameter ')' Dims {
-        $$ = make_method_signature($1, NULL, @$);
+        $$ = make_method_signature($1, make_params_list($3, @$), @$);
     }
     | IDENTIFIER_MethodDeclarator '(' FormalParameterList ')' Dims {
         $$ = make_method_signature($1, $3, @$);
@@ -1855,10 +2367,12 @@ MethodDeclarator:
     }
 
     | IDENTIFIER_MethodDeclarator '(' ReceiverParameter ',' FormalParameterList ')' {
-        $$ = make_method_signature($1, $5, @$);
+        AstNode *params = $5 ? $5 : make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_prepend_child(params, $3);
+        $$ = make_method_signature($1, params, @$);
     }
     | IDENTIFIER_MethodDeclarator '(' ReceiverParameter ')' {
-        $$ = make_method_signature($1, NULL, @$);
+        $$ = make_method_signature($1, make_params_list($3, @$), @$);
     }
     | IDENTIFIER_MethodDeclarator '(' FormalParameterList ')' {
         $$ = make_method_signature($1, $3, @$);
@@ -1868,15 +2382,32 @@ MethodDeclarator:
     }
 ;
 
+// 接收者参数（this）。
 ReceiverParameter:
-    Annotations UnannType TYPE_IDENTIFIER '.' THIS
-    | Annotations UnannType IdentifierComplement '.' THIS
-    | Annotations UnannType THIS
-    | UnannType TYPE_IDENTIFIER '.' THIS
-    | UnannType IdentifierComplement '.' THIS
-    | UnannType THIS
+    Annotations UnannType TYPE_IDENTIFIER '.' THIS {
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_receiver_parameter_node(mods, $2, $3, @5, @$);
+    }
+    | Annotations UnannType IdentifierComplement '.' THIS {
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_receiver_parameter_node(mods, $2, $3, @5, @$);
+    }
+    | Annotations UnannType THIS {
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_receiver_parameter_node(mods, $2, NULL, @3, @$);
+    }
+    | UnannType TYPE_IDENTIFIER '.' THIS {
+        $$ = make_receiver_parameter_node(NULL, $1, $2, @4, @$);
+    }
+    | UnannType IdentifierComplement '.' THIS {
+        $$ = make_receiver_parameter_node(NULL, $1, $2, @4, @$);
+    }
+    | UnannType THIS {
+        $$ = make_receiver_parameter_node(NULL, $1, NULL, @2, @$);
+    }
 ;
 
+// 形参列表（含可变参数）。
 FormalParameterList:
     FormalParameter {
         $$ = make_params_list($1, @$);
@@ -1887,45 +2418,47 @@ FormalParameterList:
     }
 ;
 
-// 这里为了避免冲突把 VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
+// 这里为了避免冲突?VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
 FormalParameter:
 //    VariableModifiers UnannType VariableDeclaratorId
 //    | Annotations UnannType VariableDeclaratorId
 //    | UnannType VariableDeclaratorId
     VariableModifiers UnannType TYPE_IDENTIFIER Dims {
-        $$ = make_parameter_node($2, $3, @$);
-}
-| Annotations UnannType TYPE_IDENTIFIER Dims {
-        $$ = make_parameter_node($2, $3, @$);
-}
-| UnannType TYPE_IDENTIFIER Dims {
-    AstNode *p = make_parameter_node($1, $2, @$);
-    if ($3) ast_add_child(p, $3);
-    $$ = p;
-}
+        $$ = make_parameter_with_mods($1, $2, $3, $4, @$);
+    }
+    | Annotations UnannType TYPE_IDENTIFIER Dims {
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_parameter_with_mods(mods, $2, $3, $4, @$);
+    }
+    | UnannType TYPE_IDENTIFIER Dims {
+        $$ = make_parameter_with_dims($1, $2, $3, @$);
+    }
     | VariableModifiers UnannType TYPE_IDENTIFIER {
-        $$ = make_parameter_node($2, $3, @$);
+        $$ = make_parameter_with_mods($1, $2, $3, NULL, @$);
     }
     | Annotations UnannType TYPE_IDENTIFIER {
-        $$ = make_parameter_node($2, $3, @$);
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_parameter_with_mods(mods, $2, $3, NULL, @$);
     }
     | UnannType TYPE_IDENTIFIER {
         $$ = make_parameter_node($1, $2, @$);
     }
     | VariableModifiers UnannType IdentifierComplement Dims {
-        $$ = make_parameter_node($2, $3, @$);
-}
-| Annotations UnannType IdentifierComplement Dims {
-        $$ = make_parameter_node($2, $3, @$);
-}
-| UnannType IdentifierComplement Dims {
-        $$ = make_parameter_node($1, $2, @$);
-}
+        $$ = make_parameter_with_mods($1, $2, $3, $4, @$);
+    }
+    | Annotations UnannType IdentifierComplement Dims {
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_parameter_with_mods(mods, $2, $3, $4, @$);
+    }
+    | UnannType IdentifierComplement Dims {
+        $$ = make_parameter_with_dims($1, $2, $3, @$);
+    }
     | VariableModifiers UnannType IdentifierComplement {
-        $$ = make_parameter_node($2, $3, @$);
+        $$ = make_parameter_with_mods($1, $2, $3, NULL, @$);
     }
     | Annotations UnannType IdentifierComplement {
-        $$ = make_parameter_node($2, $3, @$);
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_parameter_with_mods(mods, $2, $3, NULL, @$);
     }
     | UnannType IdentifierComplement {
         $$ = make_parameter_node($1, $2, @$);
@@ -1941,70 +2474,55 @@ FormalParameter:
     }
 ;
 
-// 这里需要前探去看 Annotations 后面是 '[ ]' 还是 '...'(ELLIPSIS)
+// 可变参数。
 VariableArityParameter:
     VariableModifiers UnannType Annotations ELLIPSIS TYPE_IDENTIFIER {
-        AstNode *param = make_parameter_node($2, $5, @$);
-        ast_add_child(param, make_keyword_leaf("...", @4));
-        $$ = param;
+        AstNode *mods = merge_param_modifiers($1, $3, @3);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $2, $5, NULL, @$));
     }
     | VariableModifiers UnannType ELLIPSIS TYPE_IDENTIFIER {
-        AstNode *param = make_parameter_node($2, $4, @$);
-        ast_add_child(param, make_keyword_leaf("...", @3));
-        $$ = param;
+        $$ = mark_varargs_parameter(make_parameter_with_mods($1, $2, $4, NULL, @$));
     }
     | Annotations UnannType Annotations ELLIPSIS TYPE_IDENTIFIER {
-        AstNode *param = make_parameter_node($2, $5, @$);
-        ast_add_child(param, make_keyword_leaf("...", @4));
-        $$ = param;
+        AstNode *mods = merge_param_modifiers(make_modifiers_from_annotations($1, @1), $3, @3);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $2, $5, NULL, @$));
     }
     | Annotations UnannType ELLIPSIS TYPE_IDENTIFIER {
-        AstNode *param = make_parameter_node($2, $4, @$);
-        ast_add_child(param, make_keyword_leaf("...", @3));
-        $$ = param;
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $2, $4, NULL, @$));
     }
     | UnannType Annotations ELLIPSIS TYPE_IDENTIFIER {
-        AstNode *param = make_parameter_node($1, $4, @$);
-        ast_add_child(param, make_keyword_leaf("...", @3));
-        $$ = param;
+        AstNode *mods = make_modifiers_from_annotations($2, @2);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $1, $4, NULL, @$));
     }
     | UnannType ELLIPSIS TYPE_IDENTIFIER {
-        AstNode *param = make_parameter_node($1, $3, @$);
-        ast_add_child(param, make_keyword_leaf("...", @2));
-        $$ = param;
+        $$ = mark_varargs_parameter(make_parameter_node($1, $3, @$));
     }
     | VariableModifiers UnannType Annotations ELLIPSIS IdentifierComplement {
-        AstNode *param = make_parameter_node($2, $5, @$);
-        ast_add_child(param, make_keyword_leaf("...", @4));
-        $$ = param;
+        AstNode *mods = merge_param_modifiers($1, $3, @3);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $2, $5, NULL, @$));
     }
     | VariableModifiers UnannType ELLIPSIS IdentifierComplement {
-        AstNode *param = make_parameter_node($2, $4, @$);
-        ast_add_child(param, make_keyword_leaf("...", @3));
-        $$ = param;
+        $$ = mark_varargs_parameter(make_parameter_with_mods($1, $2, $4, NULL, @$));
     }
     | Annotations UnannType Annotations ELLIPSIS IdentifierComplement {
-        AstNode *param = make_parameter_node($2, $5, @$);
-        ast_add_child(param, make_keyword_leaf("...", @4));
-        $$ = param;
+        AstNode *mods = merge_param_modifiers(make_modifiers_from_annotations($1, @1), $3, @3);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $2, $5, NULL, @$));
     }
     | Annotations UnannType ELLIPSIS IdentifierComplement {
-        AstNode *param = make_parameter_node($2, $4, @$);
-        ast_add_child(param, make_keyword_leaf("...", @3));
-        $$ = param;
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $2, $4, NULL, @$));
     }
     | UnannType Annotations ELLIPSIS IdentifierComplement {
-        AstNode *param = make_parameter_node($1, $4, @$);
-        ast_add_child(param, make_keyword_leaf("...", @3));
-        $$ = param;
+        AstNode *mods = make_modifiers_from_annotations($2, @2);
+        $$ = mark_varargs_parameter(make_parameter_with_mods(mods, $1, $4, NULL, @$));
     }
     | UnannType ELLIPSIS IdentifierComplement {
-        AstNode *param = make_parameter_node($1, $3, @$);
-        ast_add_child(param, make_keyword_leaf("...", @2));
-        $$ = param;
+        $$ = mark_varargs_parameter(make_parameter_node($1, $3, @$));
     }
 ;
 
+// 变量修饰符列表。
 VariableModifiers:
     FINAL {
         $$ = make_list_node(AST_MODIFIER_LIST, @$);
@@ -2028,10 +2546,12 @@ VariableModifiers:
     }
 ;
 
+// throws 子句。
 Throws:
     THROWS ExceptionTypeList { $$ = make_throws_node($2, @$); }
 ;
 
+// 异常类型列表。
 ExceptionTypeList:
     ExceptionType {
         $$ = make_list_node(AST_EXCEPTION_TYPE_LIST, @$);
@@ -2044,27 +2564,35 @@ ExceptionTypeList:
 ;
 
 
+// 异常类型。
 ExceptionType:
     ClassOrInterfaceType
-//    | TypeVariable      // 因为 ClassOrInterfaceType 实际包括 TypeVariable 的内容（ ClassOrInterfaceType: TypeVariable ），故而这里将这一行语句去掉
+//    | TypeVariable      // 因为 ClassOrInterfaceType 实际包括 TypeVariable 的内容（ ClassOrInterfaceType: TypeVariable ），故而这里将这一行语句去?
 ;
 
+// 方法体或分号。
 MethodBody:
     Block { $$ = $1; }
-    | ';' { $$ = AST_EMPTY_NODE(AST_BLOCK, @1); }
+    | ';' { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
+// 实例初始化块。
 InstanceInitializer:
     Block { $$ = wrap_labeled_block("instance-init", $1, @1); }
 ;
 
+// 静态初始化块。
 StaticInitializer:
     STATIC Block { $$ = wrap_labeled_block("static-init", $2, @1); }
 ;
 
 
+// 构造器声明。
 ConstructorDeclaration:
     Modifiers ConstructorDeclarator Throws ConstructorBody {
+        if ($1) {
+            ast_prepend_child($2, $1);
+        }
         if ($3) {
             ast_add_child($2, $3);
         }
@@ -2074,6 +2602,9 @@ ConstructorDeclaration:
         $$ = $2;
     }
     | Modifiers ConstructorDeclarator ConstructorBody {
+        if ($1) {
+            ast_prepend_child($2, $1);
+        }
         if ($3) {
             ast_add_child($2, $3);
         }
@@ -2096,18 +2627,45 @@ ConstructorDeclaration:
     }
 ;
 
+// 构造器声明子句。
 ConstructorDeclarator:
     TypeParameters SimpleTypeName '(' ReceiverParameter ',' FormalParameterList ')' {
-        $$ = make_constructor_node($2, $6, @$);
+        AstNode *params = $6 ? $6 : make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_prepend_child(params, $4);
+        AstNode *ctor = make_constructor_node($2, params, @$);
+        if ($1) {
+            ast_prepend_child(ctor, $1);
+        }
+        $$ = ctor;
+    }
+    | TypeParameters SimpleTypeName '(' ReceiverParameter ')' {
+        AstNode *ctor = make_constructor_node($2, make_params_list($4, @$), @$);
+        if ($1) {
+            ast_prepend_child(ctor, $1);
+        }
+        $$ = ctor;
     }
     | TypeParameters SimpleTypeName '(' FormalParameterList ')' {
-        $$ = make_constructor_node($2, $4, @$);
+        AstNode *ctor = make_constructor_node($2, $4, @$);
+        if ($1) {
+            ast_prepend_child(ctor, $1);
+        }
+        $$ = ctor;
     }
     | TypeParameters SimpleTypeName '(' ')' {
-        $$ = make_constructor_node($2, NULL, @$);
+        AstNode *ctor = make_constructor_node($2, NULL, @$);
+        if ($1) {
+            ast_prepend_child(ctor, $1);
+        }
+        $$ = ctor;
     }
     | SimpleTypeName '(' ReceiverParameter ',' FormalParameterList ')' {
-        $$ = make_constructor_node($1, $5, @$);
+        AstNode *params = $5 ? $5 : make_list_node(AST_ARGUMENT_LIST, @$);
+        ast_prepend_child(params, $3);
+        $$ = make_constructor_node($1, params, @$);
+    }
+    | SimpleTypeName '(' ReceiverParameter ')' {
+        $$ = make_constructor_node($1, make_params_list($3, @$), @$);
     }
     | SimpleTypeName '(' FormalParameterList ')' {
         $$ = make_constructor_node($1, $3, @$);
@@ -2117,25 +2675,35 @@ ConstructorDeclarator:
     }
 ;
 
+// 简单类型名。
 SimpleTypeName:
     TYPE_IDENTIFIER_MethodDeclarator { $$ = $1; }
 ;
 
+// 构造器体。
 ConstructorBody:
     '{' ExplicitConstructorInvocation BlockStatements '}' {
-        $$ = AST_BRANCH_AT(AST_BLOCK, @1, 0);
+        if ($2) {
+            ast_prepend_child($3, $2);
+        }
+        $$ = make_block_node(@1, $3);
     }
     | '{' ExplicitConstructorInvocation '}' {
-        $$ = AST_BRANCH_AT(AST_BLOCK, @1, 0);
+        AstNode *stmts = make_list_node(AST_STATEMENT_LIST, @1);
+        if ($2) {
+            ast_add_child(stmts, $2);
+        }
+        $$ = make_block_node(@1, stmts);
     }
     | '{' BlockStatements '}' {
-        $$ = AST_BRANCH_AT(AST_BLOCK, @1, 0);
+        $$ = make_block_node(@1, $2);
     }
     | '{' '}' {
-        $$ = AST_BRANCH_AT(AST_BLOCK, @1, 0);
+        $$ = make_block_node(@1, NULL);
     }
 ;
 
+// 显式构造器调用（this/super）。
 ExplicitConstructorInvocation:
     TypeArguments THIS '(' ArgumentList ')' ';' {
         $$ = make_explicit_ctor_invocation(NULL, $1, "this", $4, @2);
@@ -2187,9 +2755,10 @@ ExplicitConstructorInvocation:
     }
 ;
 
+// 枚举声明与枚举常量。
 EnumDeclaration:
     Modifiers ENUM TYPE_IDENTIFIER_EnumDeclaration Superinterfaces EnumBody {
-        /* 4 个孩子: 修饰符, 名字, superinterfaces, body */
+        /* 4 个孩? 修饰? 名字, superinterfaces, body */
         $$ = ast_branch(AST_ENUM_DECL,
                         @2.first_line, @2.first_column,
                         4,
@@ -2228,6 +2797,7 @@ EnumDeclaration:
 ;
 
 
+// 枚举体。
 EnumBody:
     '{' EnumConstantList ',' EnumBodyDeclarations '}' {
         $$ = ast_branch(AST_BLOCK, @1.first_line, @1.first_column, 0);
@@ -2254,6 +2824,7 @@ EnumBody:
     }
 ;
 
+// 枚举常量列表。
 EnumConstantList:
     EnumConstant {
         $$ = ast_branch(AST_STATEMENT_LIST, @1.first_line, @1.first_column, 1, $1);
@@ -2265,8 +2836,8 @@ EnumConstantList:
 ;
 
 
-// 在新一次的迭代中，我们认为可以直接把 EnumConstantModifiers 替换为 Annotations
-// 这里为了避免冲突把 TYPE_IDENTIFIER 直接换成了 SimpleTypeName
+// 在新一次的迭代中，我们认为可以直接?EnumConstantModifiers 替换?Annotations
+// 这里为了避免冲突?TYPE_IDENTIFIER 直接换成?SimpleTypeName
 EnumConstant:
     Annotations SimpleTypeName '(' ArgumentList ')' ClassBody {
         $$ = make_enum_constant($1, $2, $4, $6, @$);
@@ -2318,6 +2889,7 @@ EnumConstant:
     }
 ;
 
+// 枚举体声明（常量列表后可选声明）。
 EnumBodyDeclarations:
     ';' ClassBodyDeclarationList {
         $$ = $2;
@@ -2327,9 +2899,11 @@ EnumBodyDeclarations:
 
 
 //-----------------------------------Interfaces-------------------------------------
+// 接口与注解类型：接口声明、注解类型声明及成员。
 
 
 
+// 接口声明入口。
 InterfaceDeclaration:
     NormalInterfaceDeclaration { $$ = $1; }
     | AnnotationTypeDeclaration {
@@ -2337,6 +2911,7 @@ InterfaceDeclaration:
     }
 ;
 
+// 普通接口声明。
 NormalInterfaceDeclaration:
     Modifiers INTERFACE TYPE_IDENTIFIER OptTypeParameters OptExtendsInterfaces OptClassOrInterfacePermits InterfaceBody {
         $$ = make_interface_basic(@2.first_line, @2.first_column, 
@@ -2347,7 +2922,7 @@ NormalInterfaceDeclaration:
                                   $6, /* Permits */
                                   $7);/* Body */
     }
-  | INTERFACE TYPE_IDENTIFIER OptTypeParameters OptExtendsInterfaces OptClassOrInterfacePermits InterfaceBody {
+    | INTERFACE TYPE_IDENTIFIER OptTypeParameters OptExtendsInterfaces OptClassOrInterfacePermits InterfaceBody {
         $$ = make_interface_basic(@1.first_line, @1.first_column, 
                                   NULL, 
                                   $2, 
@@ -2359,17 +2934,20 @@ NormalInterfaceDeclaration:
 ;
 
 
+// 接口继承列表（extends ...）。
 ExtendsInterfaces:
     EXTENDS InterfaceTypeList {
         $$ = $2;
     }
 ;
 
+// 可选 extends 接口列表。
 OptExtendsInterfaces:
     ExtendsInterfaces { $$ = $1; }
     | /* empty */ { $$ = NULL; }
 ;
 
+// 接口体与成员列表。
 InterfaceBody:
     '{' InterfaceMemberDeclarationList '}' { $$ = $2; }
     | '{' '}' { $$ = ast_branch(AST_BLOCK, @1.first_line, @1.first_column, 0); }
@@ -2386,6 +2964,7 @@ InterfaceMemberDeclarationList:
     }
 ;
 
+// 接口成员声明。
 InterfaceMemberDeclaration:
     ConstantDeclaration { $$ = $1; }
     | InterfaceMethodDeclaration { $$ = $1; }
@@ -2395,6 +2974,7 @@ InterfaceMemberDeclaration:
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
+// 接口常量声明。
 ConstantDeclaration:
     Modifiers UnannType VariableDeclaratorList ';' {
         $$ = make_field_node($1, $2, $3, @2);
@@ -2405,8 +2985,12 @@ ConstantDeclaration:
 ;
 
 
+// 接口方法声明。
 InterfaceMethodDeclaration:
     Modifiers MethodHeader MethodBody {
+        if ($1) {
+            ast_prepend_child($2, $1);
+        }
         if ($3) {
             ast_add_child($2, $3);
         }
@@ -2420,30 +3004,32 @@ InterfaceMethodDeclaration:
     }
 ;
 
-// 在词法里区分 AnnotationTypeDeclaration 的 '@' 和 Annotation 的 '@'
+// 在词法里区分 AnnotationTypeDeclaration ?'@' ?Annotation ?'@'
+// 注解类型声明。
 AnnotationTypeDeclaration:
     /* 原有规则保持不变 */
     Modifiers AT_AnnotationTypeDeclaration INTERFACE TYPE_IDENTIFIER AnnotationTypeBody {
-        $$ = make_interface_basic(@3.first_line, @3.first_column, $1, $4, NULL, NULL, NULL, $5 ? $5 : ast_branch(AST_BLOCK, @3.first_line, @3.first_column, 0));
+        $$ = make_annotation_decl_basic(@3.first_line, @3.first_column, $1, $4, NULL, NULL, NULL, $5 ? $5 : ast_branch(AST_BLOCK, @3.first_line, @3.first_column, 0));
     }
     | AT_AnnotationTypeDeclaration INTERFACE TYPE_IDENTIFIER AnnotationTypeBody {
-        $$ = make_interface_basic(@2.first_line, @2.first_column, NULL, $3, NULL, NULL, NULL, $4 ? $4 : ast_branch(AST_BLOCK, @2.first_line, @2.first_column, 0));
+        $$ = make_annotation_decl_basic(@2.first_line, @2.first_column, NULL, $3, NULL, NULL, NULL, $4 ? $4 : ast_branch(AST_BLOCK, @2.first_line, @2.first_column, 0));
     }
-    /* === 新增以下规则以兼容 Lexer 返回的普通 AT Token === */
+    /* === 新增以下规则以兼?Lexer 返回的普?AT Token === */
     | Modifiers AT_Modifier INTERFACE TYPE_IDENTIFIER AnnotationTypeBody {
-        $$ = make_interface_basic(@3.first_line, @3.first_column, $1, $4, NULL, NULL, NULL, $5 ? $5 : ast_branch(AST_BLOCK, @3.first_line, @3.first_column, 0));
+        $$ = make_annotation_decl_basic(@3.first_line, @3.first_column, $1, $4, NULL, NULL, NULL, $5 ? $5 : ast_branch(AST_BLOCK, @3.first_line, @3.first_column, 0));
     }
     | AT_Modifier INTERFACE TYPE_IDENTIFIER AnnotationTypeBody {
-        $$ = make_interface_basic(@2.first_line, @2.first_column, NULL, $3, NULL, NULL, NULL, $4 ? $4 : ast_branch(AST_BLOCK, @2.first_line, @2.first_column, 0));
+        $$ = make_annotation_decl_basic(@2.first_line, @2.first_column, NULL, $3, NULL, NULL, NULL, $4 ? $4 : ast_branch(AST_BLOCK, @2.first_line, @2.first_column, 0));
     }
-    /* 如果你的 Lexer 返回的是字符 '@' 而不是宏定义，可以把下面这行也加上 */
+    /* 如果你的 Lexer 返回的是字符 '@' 而不是宏定义，可以把下面这行也加?*/
     | Modifiers '@' INTERFACE TYPE_IDENTIFIER AnnotationTypeBody {
-         $$ = make_interface_basic(@3.first_line, @3.first_column, $1, $4, NULL, NULL, NULL, $5 ? $5 : ast_branch(AST_BLOCK, @3.first_line, @3.first_column, 0));
+         $$ = make_annotation_decl_basic(@3.first_line, @3.first_column, $1, $4, NULL, NULL, NULL, $5 ? $5 : ast_branch(AST_BLOCK, @3.first_line, @3.first_column, 0));
     }
     | '@' INTERFACE TYPE_IDENTIFIER AnnotationTypeBody {
-         $$ = make_interface_basic(@2.first_line, @2.first_column, NULL, $3, NULL, NULL, NULL, $4 ? $4 : ast_branch(AST_BLOCK, @2.first_line, @2.first_column, 0));
+         $$ = make_annotation_decl_basic(@2.first_line, @2.first_column, NULL, $3, NULL, NULL, NULL, $4 ? $4 : ast_branch(AST_BLOCK, @2.first_line, @2.first_column, 0));
     }
 ;
+// 注解类型体。
 AnnotationTypeBody:
     '{' AnnotationTypeMemberDeclarationList '}' {
         $$ = $2;
@@ -2464,6 +3050,7 @@ AnnotationTypeMemberDeclarationList:
     }
 ;
 
+// 注解类型成员声明。
 AnnotationTypeMemberDeclaration:
     AnnotationTypeElementDeclaration { $$ = $1; }
     | ConstantDeclaration { $$ = $1; }
@@ -2473,6 +3060,7 @@ AnnotationTypeMemberDeclaration:
     | EMPTY_STMT { $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column); }
 ;
 
+// 注解元素声明。
 AnnotationTypeElementDeclaration:
 //    AnnotationTypeElementModifiers UnannType IDENTIFIER_MethodDeclarator '(' ')' Dims DefaultValue ';'
 //    | AnnotationTypeElementModifiers UnannType IDENTIFIER_MethodDeclarator '(' ')' Dims ';'
@@ -2504,12 +3092,14 @@ AnnotationTypeElementDeclaration:
     }
 ;
 
+// 注解元素默认值。
 DefaultValue:
     DEFAULT ElementValue {
-        $$ = AST_BRANCH_AT(AST_ASSIGN, @1, 1, $2);
+        $$ = AST_BRANCH_AT(AST_DEFAULT_VALUE, @1, 1, $2);
     }
 ;
 
+// 注解入口。
 Annotation:
     NormalAnnotation { $$ = $1; }
     | MarkerAnnotation { $$ = $1; }
@@ -2523,11 +3113,12 @@ Annotations:
         $$ = $1;
     }
     | Annotation {
-        $$ = make_list_node(AST_ANNOTATION, @$);
+        $$ = make_list_node(AST_ANNOTATION_LIST, @$);
         ast_add_child($$, $1);
     }
 ;
 
+// 普通注解。
 NormalAnnotation:
     '@' TypeName_ModifierOrDims '(' ElementValuePairList ')' {
         AstNode *node = make_annotation_node($2, @1);
@@ -2539,6 +3130,7 @@ NormalAnnotation:
     }
 ;
 
+// 注解键值对列表。
 ElementValuePairList:
     ElementValuePair {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -2550,6 +3142,7 @@ ElementValuePairList:
     }
 ;
 
+// 注解键值对。
 ElementValuePair:
     TYPE_IDENTIFIER '=' ElementValue {
         AstNode *node = AST_BRANCH_AT(AST_ASSIGN, @2, 0);
@@ -2565,6 +3158,7 @@ ElementValuePair:
     }
 ;
 
+// 注解元素值。
 ElementValue:
     ConditionalExpression
 //    | ConditionalOrExpression
@@ -2572,6 +3166,7 @@ ElementValue:
     | Annotation { $$ = $1; }
 ;
 
+// 注解数组值初始化器。
 ElementValueArrayInitializer:
     '{' ElementValueList ',' '}' {
         $$ = make_array_initializer_node($2, @1);
@@ -2585,6 +3180,7 @@ ElementValueArrayInitializer:
     }
 ;
 
+// 注解元素值列表。
 ElementValueList:
     ElementValue {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -2596,12 +3192,14 @@ ElementValueList:
     }
 ;
 
+// 标记注解。
 MarkerAnnotation:
     '@' TypeName {
         $$ = make_annotation_node($2, @1);
     }
 ;
 
+// 单元素注解。
 SingleElementAnnotation:
     '@' TypeName_ModifierOrDims '(' ElementValue ')' {
         AstNode *node = make_annotation_node($2, @1);
@@ -2615,9 +3213,8 @@ SingleElementAnnotation:
 
 
 //--------------------------------Blocks and Statements---------------------------
-
-
-
+// 语句与块：控制流、声明语句、跳转语句、try/with/switch 等。
+// 语句块与本地声明。
 Block:
     '{' BlockStatements '}' {
         $$ = make_block_node(@1, $2);
@@ -2627,6 +3224,7 @@ Block:
     }
 ;
 
+// 代码块语句列表。
 BlockStatements:
     BlockStatement {
         $$ = make_list_node(AST_STATEMENT_LIST, @$);
@@ -2642,38 +3240,45 @@ BlockStatements:
     }
 ;
 
+// 代码块内的单条语句/声明。
 BlockStatement:
     LocalVariableDeclarationStatement { $$ = $1; }
     | LocalClassOrInterfaceDeclaration { $$ = $1; }
     | Statement { $$ = $1; }
 ;
 
+// 本地变量声明语句。
 LocalVariableDeclarationStatement:
     LocalVariableDeclaration ';' { $$ = $1; }
 ;
 
+// 本地变量声明。
 LocalVariableDeclaration:
     VariableModifiers LocalVariableType VariableDeclaratorList {
-        $$ = make_local_variable_node($2, $3, @2);
+        $$ = make_local_variable_node($1, $2, $3, @2);
     }
     | Annotations LocalVariableType VariableDeclaratorList {
-        $$ = make_local_variable_node($2, $3, @2);
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_local_variable_node(mods, $2, $3, @2);
     }
     | LocalVariableType VariableDeclaratorList {
-        $$ = make_local_variable_node($1, $2, @1);
+        $$ = make_local_variable_node(NULL, $1, $2, @1);
     }
 ;
 
+// 本地变量类型。
 LocalVariableType:
     UnannType { $$ = $1; }
-    | VAR { $$ = make_keyword_leaf("var", @1); }
+    | VAR { $$ = make_type_node(make_keyword_leaf("var", @1), @1); }
 ;
 
+// 本地类/接口声明。
 LocalClassOrInterfaceDeclaration:
     ClassDeclaration { $$ = $1; }
     | NormalInterfaceDeclaration { $$ = $1; }
 ;
 
+// 通用语句入口（含短 if 处理）。
 Statement:
     StatementWithoutTrailingSubstatement { $$ = $1; }
     | LabeledStatement { $$ = $1; }
@@ -2683,6 +3288,7 @@ Statement:
     | ForStatement { $$ = $1; }
 ;
 
+// 无短 if 语句入口。
 StatementNoShortIf:
     StatementWithoutTrailingSubstatement { $$ = $1; }
     | LabeledStatementNoShortIf { $$ = $1; }
@@ -2691,6 +3297,7 @@ StatementNoShortIf:
     | ForStatementNoShortIf { $$ = $1; }
 ;
 
+// 无尾随子语句入口。
 StatementWithoutTrailingSubstatement:
     Block { $$ = $1; }
     | EmptyStatement { $$ = $1; }
@@ -2707,6 +3314,7 @@ StatementWithoutTrailingSubstatement:
     | YieldStatement { $$ = $1; }
 ;
 
+// 空语句。
 EmptyStatement:
     EMPTY_STMT {
         $$ = ast_leaf(AST_EMPTY, ";", @1.first_line, @1.first_column);
@@ -2716,6 +3324,7 @@ EmptyStatement:
     }
 ;
 
+// 带标签语句。
 LabeledStatement:
     TYPE_IDENTIFIER ':' Statement {
         AstNode *node = make_unary_stmt(AST_LABELED_STATEMENT, $3, @1);
@@ -2729,6 +3338,7 @@ LabeledStatement:
     }
 ;
 
+// 无短 if 的带标签语句。
 LabeledStatementNoShortIf:
     TYPE_IDENTIFIER ':' StatementNoShortIf {
         AstNode *node = make_unary_stmt(AST_LABELED_STATEMENT, $3, @1);
@@ -2742,12 +3352,14 @@ LabeledStatementNoShortIf:
     }
 ;
 
+// 表达式语句。
 ExpressionStatement:
     StatementExpression ';' {
         $$ = $1;
     }
 ;
 
+// 语句中的表达式。
 StatementExpression:
     Assignment { $$ = $1; }
     | PreIncrementExpression { $$ = $1; }
@@ -2758,24 +3370,30 @@ StatementExpression:
     | ClassInstanceCreationExpression { $$ = $1; }
 ;
 
+// if/else 条件语句。
 IfThenStatement:
     IF '(' Expression ')' Statement {
         $$ = make_ternary_stmt(AST_IF, $3, $5, NULL, @1);
     }
 ;
 
+// if-else 语句。
 IfThenElseStatement:
     IF '(' Expression ')' StatementNoShortIf ELSE Statement {
-        $$ = make_ternary_stmt(AST_IF, $3, $5, $7, @1);
+        AstNode *else_clause = make_else_clause_node($7, @6);
+        $$ = make_ternary_stmt(AST_IF, $3, $5, else_clause, @1);
     }
 ;
 
+// 无短 if 的 if-else 语句。
 IfThenElseStatementNoShortIf:
     IF '(' Expression ')' StatementNoShortIf ELSE StatementNoShortIf {
-        $$ = make_ternary_stmt(AST_IF, $3, $5, $7, @1);
+        AstNode *else_clause = make_else_clause_node($7, @6);
+        $$ = make_ternary_stmt(AST_IF, $3, $5, else_clause, @1);
     }
 ;
 
+// assert 断言语句。
 AssertStatement:
     ASSERT Expression ';' {
         $$ = make_unary_stmt(AST_ASSERT, $2, @1);
@@ -2786,6 +3404,7 @@ AssertStatement:
     }
 ;
 
+// switch 语句与规则。
 SwitchStatement:
     SWITCH '(' Expression ')' SwitchBlock {
         AstNode *node = make_unary_stmt(AST_SWITCH, $3, @1);
@@ -2796,6 +3415,7 @@ SwitchStatement:
     }
 ;
 
+// switch 块。
 SwitchBlock:
     '{' SwitchRules '}' {
         $$ = $2;
@@ -2809,23 +3429,36 @@ SwitchBlock:
     }
 ;
 
+// switch 规则（箭头形式）。
 SwitchRule:
     SwitchLabel ARROW Expression ';' {
-        AstNode *node = AST_BRANCH_AT(AST_SWITCH_LABEL, @1, 0);
-        ast_add_child(node, $1);
-        ast_add_child(node, $3);
+        AstNode *labels = make_list_node(AST_SWITCH_LABEL_LIST, @1);
+        ast_add_child(labels, $1);
+        AstNode *node = AST_BRANCH_AT(AST_SWITCH_RULE, @1, 0);
+        ast_add_child(node, labels);
+        if ($3) {
+            ast_add_child(node, $3);
+        }
         $$ = node;
     }
     | SwitchLabel ARROW Block {
-        AstNode *node = AST_BRANCH_AT(AST_SWITCH_LABEL, @1, 0);
-        ast_add_child(node, $1);
-        ast_add_child(node, $3);
+        AstNode *labels = make_list_node(AST_SWITCH_LABEL_LIST, @1);
+        ast_add_child(labels, $1);
+        AstNode *node = AST_BRANCH_AT(AST_SWITCH_RULE, @1, 0);
+        ast_add_child(node, labels);
+        if ($3) {
+            ast_add_child(node, $3);
+        }
         $$ = node;
     }
     | SwitchLabel ARROW ThrowStatement {
-        AstNode *node = AST_BRANCH_AT(AST_SWITCH_LABEL, @1, 0);
-        ast_add_child(node, $1);
-        ast_add_child(node, $3);
+        AstNode *labels = make_list_node(AST_SWITCH_LABEL_LIST, @1);
+        ast_add_child(labels, $1);
+        AstNode *node = AST_BRANCH_AT(AST_SWITCH_RULE, @1, 0);
+        ast_add_child(node, labels);
+        if ($3) {
+            ast_add_child(node, $3);
+        }
         $$ = node;
     }
 ;
@@ -2833,7 +3466,7 @@ SwitchRule:
 // 允许使用一个或者多个SwitchRule
 SwitchRules:
     SwitchRule {
-        $$ = make_list_node(AST_STATEMENT_LIST, @$);
+        $$ = make_list_node(AST_SWITCH_RULE_LIST, @$);
         ast_add_child($$, $1);
     }
     | SwitchRules SwitchRule {
@@ -2842,9 +3475,10 @@ SwitchRules:
     }
 ;
 
+// switch 语句组。
 SwitchBlockStatementGroup:
     SwitchLabels BlockStatements {
-        AstNode *node = AST_BRANCH_AT(AST_SWITCH_LABEL, @1, 0);
+        AstNode *node = AST_BRANCH_AT(AST_SWITCH_GROUP, @1, 0);
         ast_add_child(node, $1);
         if ($2) {
             ast_add_child(node, $2);
@@ -2865,6 +3499,7 @@ SwitchBlockStatementGroups:
     }
 ;
 
+// switch 标签。
 SwitchLabel:
     CASE CaseConstants {
         AstNode *node = AST_BRANCH_AT(AST_SWITCH_LABEL, @1, 0);
@@ -2872,14 +3507,16 @@ SwitchLabel:
         $$ = node;
     }
     | DEFAULT_SwitchLabel {
-        $$ = make_keyword_leaf("default", @1);
+        AstNode *node = AST_BRANCH_AT(AST_SWITCH_LABEL, @1, 0);
+        ast_add_child(node, make_keyword_leaf("default", @1));
+        $$ = node;
     }
 ;
 
 // 允许使用一个或者多个SwitchLabel
 SwitchLabels:
     SwitchLabel ':' {
-        AstNode *node = make_list_node(AST_STATEMENT_LIST, @$);
+        AstNode *node = make_list_node(AST_SWITCH_LABEL_LIST, @$);
         ast_add_child(node, $1);
         $$ = node;
     }
@@ -2889,10 +3526,12 @@ SwitchLabels:
     }
 ;
 
+// case 常量。
 CaseConstant:
     ConditionalExpression { $$ = $1; }
 ;
 
+// case 常量列表。
 CaseConstants:
     CaseConstant {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -2904,18 +3543,21 @@ CaseConstants:
     }
 ;
 
+// while 循环。
 WhileStatement:
     WHILE '(' Expression ')' Statement {
         $$ = make_binary_stmt(AST_WHILE, $3, $5, @1);
     }
 ;
 
+// 无短 if 的 while 语句。
 WhileStatementNoShortIf:
     WHILE '(' Expression ')' StatementNoShortIf {
         $$ = make_binary_stmt(AST_WHILE, $3, $5, @1);
     }
 ;
 
+// do-while 循环。
 DoStatement:
     DO Statement WHILE '(' Expression ')' ';' {
         AstNode *node = make_binary_stmt(AST_DO_WHILE, $2, $5, @1);
@@ -2923,162 +3565,89 @@ DoStatement:
     }
 ;
 
+// for 循环（基本/增强）。
 ForStatement:
     BasicForStatement { $$ = $1; }
     | EnhancedForStatement { $$ = $1; }
 ;
 
+// 无短 if 的 for 语句入口。
 ForStatementNoShortIf:
     BasicForStatementNoShortIf { $$ = $1; }
     | EnhancedForStatementNoShortIf { $$ = $1; }
 ;
 
+// 传统 for 语句。
 BasicForStatement:
     FOR '(' ForInit ';' Expression ';' ForUpdate ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        if ($5) ast_add_child(node, $5);
-        if ($7) ast_add_child(node, $7);
-        if ($9) ast_add_child(node, $9);
-        $$ = node;
+        $$ = make_for_stmt($3, $5, $7, $9, @1);
     }
     | FOR '(' ForInit ';' Expression ';' ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        if ($5) ast_add_child(node, $5);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($8) ast_add_child(node, $8);
-        $$ = node;
+        $$ = make_for_stmt($3, $5, NULL, $8, @1);
     }
     | FOR '(' ForInit ';' ';' ForUpdate ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($6) ast_add_child(node, $6);
-        if ($8) ast_add_child(node, $8);
-        $$ = node;
+        $$ = make_for_stmt($3, NULL, $6, $8, @1);
     }
     | FOR '(' ForInit ';' ';' ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($7) ast_add_child(node, $7);
-        $$ = node;
+        $$ = make_for_stmt($3, NULL, NULL, $7, @1);
     }
     | FOR '(' ';' Expression ';' ForUpdate ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($4) ast_add_child(node, $4);
-        if ($6) ast_add_child(node, $6);
-        if ($8) ast_add_child(node, $8);
-        $$ = node;
+        $$ = make_for_stmt(NULL, $4, $6, $8, @1);
     }
     | FOR '(' ';' Expression ';' ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($4) ast_add_child(node, $4);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($7) ast_add_child(node, $7);
-        $$ = node;
+        $$ = make_for_stmt(NULL, $4, NULL, $7, @1);
     }
     | FOR '(' ';' ';' ForUpdate ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($5) ast_add_child(node, $5);
-        if ($7) ast_add_child(node, $7);
-        $$ = node;
+        $$ = make_for_stmt(NULL, NULL, $5, $7, @1);
     }
     | FOR '(' ';' ';' ')' Statement {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($6) ast_add_child(node, $6);
-        $$ = node;
+        $$ = make_for_stmt(NULL, NULL, NULL, $6, @1);
     }
 ;
 
+// 无短 if 的传统 for 语句。
 BasicForStatementNoShortIf:
     FOR '(' ForInit ';' Expression ';' ForUpdate ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        if ($5) ast_add_child(node, $5);
-        if ($7) ast_add_child(node, $7);
-        if ($9) ast_add_child(node, $9);
-        $$ = node;
+        $$ = make_for_stmt($3, $5, $7, $9, @1);
     }
     | FOR '(' ForInit ';' Expression ';' ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        if ($5) ast_add_child(node, $5);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($8) ast_add_child(node, $8);
-        $$ = node;
+        $$ = make_for_stmt($3, $5, NULL, $8, @1);
     }
     | FOR '(' ForInit ';' ';' ForUpdate ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($6) ast_add_child(node, $6);
-        if ($8) ast_add_child(node, $8);
-        $$ = node;
+        $$ = make_for_stmt($3, NULL, $6, $8, @1);
     }
     | FOR '(' ForInit ';' ';' ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        if ($3) ast_add_child(node, $3);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($7) ast_add_child(node, $7);
-        $$ = node;
+        $$ = make_for_stmt($3, NULL, NULL, $7, @1);
     }
     | FOR '(' ';' Expression ';' ForUpdate ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($4) ast_add_child(node, $4);
-        if ($6) ast_add_child(node, $6);
-        if ($8) ast_add_child(node, $8);
-        $$ = node;
+        $$ = make_for_stmt(NULL, $4, $6, $8, @1);
     }
     | FOR '(' ';' Expression ';' ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($4) ast_add_child(node, $4);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($7) ast_add_child(node, $7);
-        $$ = node;
+        $$ = make_for_stmt(NULL, $4, NULL, $7, @1);
     }
     | FOR '(' ';' ';' ForUpdate ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($5) ast_add_child(node, $5);
-        if ($7) ast_add_child(node, $7);
-        $$ = node;
+        $$ = make_for_stmt(NULL, NULL, $5, $7, @1);
     }
     | FOR '(' ';' ';' ')' StatementNoShortIf {
-        AstNode *node = AST_BRANCH_AT(AST_FOR, @1, 0);
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        ast_add_child(node, make_list_node(AST_STATEMENT_LIST, @$));
-        if ($6) ast_add_child(node, $6);
-        $$ = node;
+        $$ = make_for_stmt(NULL, NULL, NULL, $6, @1);
     }
 ;
 
+// for 初始化部分。
 ForInit:
-    StatementExpressionList { $$ = $1; }
+    StatementExpressionList { $$ = relabel_list($1, AST_FOR_INIT_LIST); }
     | LocalVariableDeclaration { $$ = $1; }
 ;
 
+// for 更新部分。
 ForUpdate:
-    StatementExpressionList { $$ = $1; }
+    StatementExpressionList { $$ = relabel_list($1, AST_FOR_UPDATE_LIST); }
 ;
 
+// 语句表达式列表。
 StatementExpressionList:
     StatementExpression {
-        $$ = make_list_node(AST_STATEMENT_LIST, @$);
+        $$ = make_list_node(AST_EXPRESSION_LIST, @$);
         if ($1) ast_add_child($$, $1);
     }
     | StatementExpressionList ',' StatementExpression {
@@ -3089,7 +3658,8 @@ StatementExpressionList:
     }
 ;
 
-// 这里为了避免冲突把 VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
+// 这里为了避免冲突?VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
+// 增强 for (for-each) 循环。
 EnhancedForStatement:
 //    FOR '(' VariableModifiers LocalVariableType VariableDeclaratorId ':' Expression ')' Statement
 //    | FOR '(' Annotations LocalVariableType VariableDeclaratorId ':' Expression ')' Statement
@@ -3144,7 +3714,7 @@ EnhancedForStatement:
     }
 ;
 
-// 这里为了避免冲突把 VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
+// 这里为了避免冲突?VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
 EnhancedForStatementNoShortIf:
 //    FOR '(' VariableModifiers LocalVariableType VariableDeclaratorId ':' Expression ')' StatementNoShortIf
 //    | FOR '(' Annotations LocalVariableType VariableDeclaratorId ':' Expression ')' StatementNoShortIf
@@ -3199,6 +3769,7 @@ EnhancedForStatementNoShortIf:
     }
 ;
 
+// 跳转语句：break/continue/return/throw/yield。
 BreakStatement:
     BREAK TYPE_IDENTIFIER ';' {
         AstNode *node = make_unary_stmt(AST_BREAK, $2, @1);
@@ -3213,12 +3784,14 @@ BreakStatement:
     }
 ;
 
+// yield 语句。
 YieldStatement:
     YIELD Expression ';' {
         $$ = make_unary_stmt(AST_YIELD, $2, @1);
     }
 ;
 
+// continue 语句。
 ContinueStatement:
     CONTINUE ';' {
         $$ = make_simple_stmt(AST_CONTINUE, @1);
@@ -3233,6 +3806,7 @@ ContinueStatement:
     }
 ;
 
+// return 语句。
 ReturnStatement:
     RETURN Expression ';' {
         $$ = make_unary_stmt(AST_RETURN, $2, @1);
@@ -3242,18 +3816,21 @@ ReturnStatement:
     }
 ;
 
+// throw 语句。
 ThrowStatement:
     THROW Expression ';' {
         $$ = make_unary_stmt(AST_THROW, $2, @1);
     }
 ;
 
+// synchronized 语句。
 SynchronizedStatement:
     SYNCHRONIZED '(' Expression ')' Block {
         $$ = make_binary_stmt(AST_SYNCHRONIZED, $3, $5, @1);
     }
 ;
 
+// try/catch/finally/with-resources。
 TryStatement:
     TRY Block Catches {
         $$ = make_try_stmt($2, $3, NULL, @1);
@@ -3269,6 +3846,7 @@ TryStatement:
     }
 ;
 
+// catch 列表。
 Catches:
     CatchClause {
         $$ = make_list_node(AST_STATEMENT_LIST, @$);
@@ -3280,6 +3858,7 @@ Catches:
     }
 ;
 
+// 单个 catch 子句。
 CatchClause:
     CATCH '(' CatchFormalParameter ')' Block {
         AstNode *node = AST_BRANCH_AT(AST_CATCH, @1, 0);
@@ -3289,7 +3868,7 @@ CatchClause:
     }
 ;
 
-// 这里为了避免冲突把 VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
+// 这里为了避免冲突?VariableDeclaratorId 直接诠释为了 IDENTIFIER Dims / IDENTIFIER ;
 CatchFormalParameter:
 //    VariableModifiers CatchType VariableDeclaratorId
 //    | Annotations CatchType VariableDeclaratorId
@@ -3332,14 +3911,22 @@ CatchFormalParameter:
     }
 ;
 
+// catch 异常类型。
 CatchType:
-    UnannClassOrInterfaceType { $$ = $1; }
-    | CatchType '|' ClassOrInterfaceType {
-        ast_add_child($1, $3);
+    UnannClassOrInterfaceType {
+        AstNode *list = make_list_node(AST_EXCEPTION_TYPE_LIST, @$);
+        ast_add_child(list, make_type_node($1, @$));
+        $$ = list;
+    }
+    | CatchType '|' UnannClassOrInterfaceType {
+        if ($1) {
+            ast_add_child($1, make_type_node($3, @3));
+        }
         $$ = $1;
     }
 ;
 
+// finally 子句。
 Finally:
     FINALLY Block {
         AstNode *node = AST_BRANCH_AT(AST_FINALLY, @1, 0);
@@ -3348,6 +3935,7 @@ Finally:
     }
 ;
 
+// try-with-resources 语句。
 TryWithResourcesStatement:
     TRY ResourceSpecification Block Catches Finally {
         AstNode *node = make_try_stmt($3, $4, $5, @1);
@@ -3379,6 +3967,7 @@ TryWithResourcesStatement:
     }
 ;
 
+// 资源声明列表（try-with-resources）。
 ResourceSpecification:
     '(' ResourceList ')' {
         $$ = AST_BRANCH_AT(AST_RESOURCE_SPEC, @$, 1, $2);
@@ -3389,6 +3978,7 @@ ResourceSpecification:
 ;
 
 
+// 资源列表。
 ResourceList:
     Resource {
         $$ = make_list_node(AST_RESOURCE_LIST, @$);
@@ -3401,66 +3991,46 @@ ResourceList:
 ;
 
 
+// 单个资源声明。
 Resource:
     VariableModifiers LocalVariableType TYPE_IDENTIFIER '=' Expression {
-        AstNode *var = make_parameter_node($2, $3, @$);
-        AstNode *assign = AST_BRANCH_AT(AST_ASSIGN, @4, 0);
-        ast_add_child(assign, var);
-        ast_add_child(assign, $5);
-
-        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, assign);
+        AstNode *decl = make_resource_decl($1, $2, $3, $5, @$);
+        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, decl);
     }
   | Annotations LocalVariableType TYPE_IDENTIFIER '=' Expression {
-        AstNode *var = make_parameter_node($2, $3, @$);
-        AstNode *assign = AST_BRANCH_AT(AST_ASSIGN, @4, 0);
-        ast_add_child(assign, var);
-        ast_add_child(assign, $5);
-
-        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, assign);
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        AstNode *decl = make_resource_decl(mods, $2, $3, $5, @$);
+        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, decl);
     }
   | LocalVariableType TYPE_IDENTIFIER '=' Expression {
-        AstNode *var = make_parameter_node($1, $2, @$);
-        AstNode *assign = AST_BRANCH_AT(AST_ASSIGN, @3, 0);
-        ast_add_child(assign, var);
-        ast_add_child(assign, $4);
-
-        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, assign);
+        AstNode *decl = make_resource_decl(NULL, $1, $2, $4, @$);
+        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, decl);
     }
   | VariableModifiers LocalVariableType IdentifierComplement '=' Expression {
-        AstNode *var = make_parameter_node($2, $3, @$);
-        AstNode *assign = AST_BRANCH_AT(AST_ASSIGN, @4, 0);
-        ast_add_child(assign, var);
-        ast_add_child(assign, $5);
-
-        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, assign);
+        AstNode *decl = make_resource_decl($1, $2, $3, $5, @$);
+        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, decl);
     }
   | Annotations LocalVariableType IdentifierComplement '=' Expression {
-        AstNode *var = make_parameter_node($2, $3, @$);
-        AstNode *assign = AST_BRANCH_AT(AST_ASSIGN, @4, 0);
-        ast_add_child(assign, var);
-        ast_add_child(assign, $5);
-
-        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, assign);
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        AstNode *decl = make_resource_decl(mods, $2, $3, $5, @$);
+        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, decl);
     }
   | LocalVariableType IdentifierComplement '=' Expression {
-        AstNode *var = make_parameter_node($1, $2, @$);
-        AstNode *assign = AST_BRANCH_AT(AST_ASSIGN, @3, 0);
-        ast_add_child(assign, var);
-        ast_add_child(assign, $4);
-
-        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, assign);
+        AstNode *decl = make_resource_decl(NULL, $1, $2, $4, @$);
+        $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, decl);
     }
   | VariableAccess {
         $$ = AST_BRANCH_AT(AST_RESOURCE, @$, 1, $1);
     }
 ;
 
-
+// 变量访问表达式。
 VariableAccess:
     CommonName { $$ = $1; }
     | FieldAccess { $$ = $1; }
 ;
 
+// 模式匹配入口。
 Pattern:
     TypePattern { $$ = $1; }
 //    | RecordPattern
@@ -3469,42 +4039,42 @@ Pattern:
 /*
 `TypePattern`是一个局部变量声明，但它不允许包含多个变量声明（即不允许使用逗号分隔的变量声明列表）
 */
+// 类型模式（instanceof 模式）。
 TypePattern:
     LocalVariableDeclaration_TypePattern { $$ = $1; }
 ;
 
+// 本地变量声明的类型模式。
 LocalVariableDeclaration_TypePattern:
     VariableModifiers LocalVariableType VariableDeclarator {
-        $$ = make_local_variable_node($2, $3, @2);
+        $$ = make_type_pattern_node($1, $2, $3, @$);
     }
     | Annotations LocalVariableType VariableDeclarator {
-        $$ = make_local_variable_node($2, $3, @2);
+        AstNode *mods = make_modifiers_from_annotations($1, @1);
+        $$ = make_type_pattern_node(mods, $2, $3, @$);
     }
     | LocalVariableType VariableDeclarator {
-        $$ = make_local_variable_node($1, $2, @1);
+        $$ = make_type_pattern_node(NULL, $1, $2, @$);
     }
 ;
 
-
-
 //------------------------------------Expressions-----------------------------------
-
-
-
+// 表达式：赋值、逻辑、方法调用、构造、lambda 等。
+// 基本表达式：字面量/this/super/括号等。
 Primary:
     PrimaryNoNewArray { $$ = $1; }
     | ArrayCreationExpression { $$ = $1; }
 ;
 
+// 基本表达式（不含新建数组）。
 PrimaryNoNewArray:
     Literal { $$ = $1; }
     | ClassLiteral { $$ = $1; }
     | THIS {
-        $$ = make_keyword_leaf("this", @1);
+        $$ = make_this_expr_node(NULL, @1);
     }
     | CommonName '.' THIS {
-        AstNode *this_node = make_keyword_leaf("this", @3);
-        $$ = make_field_access_node($1, this_node, @2);
+        $$ = make_this_expr_node($1, @3);
     }
 //    | TypeName '.' THIS
     | '(' Expression ')' { $$ = $2; }
@@ -3515,6 +4085,7 @@ PrimaryNoNewArray:
     | MethodReference { $$ = $1; }
 ;
 
+// class 字面量表达式。
 ClassLiteral:
 //    TypeName DimsNoAnnotations '.' CLASS
     CommonName DimsNoAnnotations '.' CLASS {
@@ -3549,7 +4120,7 @@ ClassLiteral:
     }
 ;
 
-// 专门为了给 ClassLiteral 引进一个或者多个 '[]'
+// 专门为了ClassLiteral 引进一个或者多'[]'
 DimsNoAnnotations:
     LBRACK ']' {
         AstNode *list = make_list_node(AST_DIM_LIST, @$);
@@ -3562,18 +4133,22 @@ DimsNoAnnotations:
     }
 ;
 
+// new 创建对象与匿名类。
 ClassInstanceCreationExpression:
     UnqualifiedClassInstanceCreationExpression { $$ = $1; }
     | CommonName '.' UnqualifiedClassInstanceCreationExpression {
         ast_prepend_child($3, $1);
+        $3->scope = $1;
         $$ = $3;
     }
     | Primary '.' UnqualifiedClassInstanceCreationExpression {
         ast_prepend_child($3, $1);
+        $3->scope = $1;
         $$ = $3;
     }
 ;
 
+// 非限定类实例创建。
 UnqualifiedClassInstanceCreationExpression:
     NEW TypeArguments ClassOrInterfaceTypeToInstantiate '(' ArgumentList ')' ClassBody {
         AstNode *type = $3;
@@ -3617,6 +4192,7 @@ UnqualifiedClassInstanceCreationExpression:
     }
 ;
 
+// 可实例化的类/接口类型。
 ClassOrInterfaceTypeToInstantiate:
     AnnotationIdentifiers TypeArgumentsOrDiamond {
         if ($2) {
@@ -3629,7 +4205,7 @@ ClassOrInterfaceTypeToInstantiate:
     }
 ;
 
-// 专门为了在 ClassOrInterfaceTypeToInstantiate 中引入一个或者多个 Annotations Identifier ，用'.'隔开
+// 专门为了ClassOrInterfaceTypeToInstantiate 中引入一个或者多Annotations Identifier ，用'.'隔开
 AnnotationIdentifiers:
     Annotations IDENTIFIER_AnnotationIdentifiers {
         ast_prepend_child($2, $1);
@@ -3646,15 +4222,19 @@ AnnotationIdentifiers:
 //    | AnnotationIdentifiers DOT_CommonName IDENTIFIER_AnnotationIdentifiers
 ;
 
+// 类型实参或菱形 <>。
 TypeArgumentsOrDiamond:
     TypeArguments {
         $$ = $1;
     }  //显式指定类型参数
     | DIAMOND {
-        $$ = make_keyword_leaf("<>", @1);
-    }      //钻石操作符
+        AstNode *list = make_list_node(AST_TYPE_ARGUMENT_LIST, @1);
+        ast_set_text(list, "<>");
+        $$ = list;
+    }      //钻石操作?
 ;
 
+// 字段/成员访问。
 FieldAccess:
     Primary '.' TYPE_IDENTIFIER {
         $$ = make_field_access_node($1, $3, @2);
@@ -3680,6 +4260,7 @@ FieldAccess:
     }
 ;
 
+// 数组访问 a[i]。
 ArrayAccess:
     CommonName LBRACK_ArrayAccess Expression ']' {
         $$ = make_array_access_node($1, $3, @2);
@@ -3709,6 +4290,7 @@ ArrayAccess:
 ;
 
 /*
+// 方法调用（含链式与超类调用）。
 MethodInvocation:
     MethodName '(' ArgumentList ')'
     | MethodName '(' ')'
@@ -3734,7 +4316,7 @@ MethodInvocation:
     | TypeName '.' SUPER '.' IDENTIFIER_MethodInvocation '(' ')'
 ;
 */
-// 这里用 CommonName 替换 TypeName 实际上扩宽了语义
+// 这里CommonName 替换 TypeName 实际上扩宽了语义
 MethodInvocation:
     // MethodName '(' ArgumentList ')'
     // | MethodName '(' ')'
@@ -3806,6 +4388,7 @@ MethodInvocation:
     }
 ;
 
+// 实参列表。
 ArgumentList:
     Expression  {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -3821,6 +4404,7 @@ ArgumentList:
     }
 ;
 
+// 方法引用 :: 形式。
 MethodReference:
 //    CommonName DOUBLE_COLON TypeArguments TYPE_IDENTIFIER
 //    | CommonName DOUBLE_COLON TYPE_IDENTIFIER
@@ -3885,7 +4469,7 @@ MethodReference:
 //    | ClassOrInterfaceType DOUBLE_COLON_MethodReference_COI TypeArguments NEW
 //    | ClassOrInterfaceType DOUBLE_COLON_MethodReference_COI NEW
 //    | ArrayType DOUBLE_COLON_MethodReference_COI NEW
-// 以下注释掉的部分是一个扩宽语义的部分，如果上面的审查方法不好使可以考虑注释掉从本行起上数三行（不含本行），并采用如下的扩宽语义法（经检测效果一致，应该不会导致新的冲突）(已采用此备案)
+// 以下注释掉的部分是一个扩宽语义的部分，如果上面的审查方法不好使可以考虑注释掉从本行起上数三行（不含本行），并采用如下的扩宽语义法（经检测效果一致，应该不会导致新的冲突已采用此备案)
     | ReferenceType DOUBLE_COLON TypeArguments NEW {
         $$ = make_method_reference_node($1, $3, make_keyword_leaf("new", @4), @2);
     }
@@ -3894,6 +4478,7 @@ MethodReference:
     }
 ;
 
+// new 创建数组。
 ArrayCreationExpression:
     NEW PrimitiveType DimExprs Dims {
         attach_dims($2, $4);
@@ -3933,7 +4518,7 @@ ArrayCreationExpression:
 //允许使用一个或者多个DimExpr
 DimExprs:
     DimExpr  {
-        $$ = make_list_node(AST_ARGUMENT_LIST, @$);
+        $$ = make_list_node(AST_DIM_EXPR_LIST, @$);
         ast_add_child($$, $1);
     }
     | DimExprs DimExpr {
@@ -3942,6 +4527,7 @@ DimExprs:
     }
 ;
 
+// 维度表达式。
 DimExpr:
     Annotations_Dims LBRACK_ArrayAccess Expression ']' {
         AstNode *dim = make_dim_node(@2);
@@ -3958,6 +4544,8 @@ DimExpr:
     }
 ;
 
+/* 表达式与 lambda 相关产生式。 */
+// 表达式入口（含 lambda/赋值/条件等）。
 Expression:
     LambdaExpression { $$ = $1; }
     | AssignmentExpression { $$ = $1; }
@@ -3965,32 +4553,35 @@ Expression:
 //    | ConditionalExpression
 ;
 
+// lambda 表达式：参数 -> 体。
 LambdaExpression:
     LambdaParameters ARROW LambdaBody {
         $$ = make_lambda_node($1, $3, @2);
     }
 ;
 
-// 这里有点小问题哈，就是我之前这里有冲突我才把'('')'替换为 LPAREN_LambdaParameters 和 RPAREN_LambdaParameters 的，但现在调试的时候替换回'('')'突然就没冲突了，我也很奇怪哈，跟那个正负号一样，待研究
+// %token LPAREN_LambdaParameters            // LambdaParameters 中的 '(' 符号（之前有冲突，调试后发现冲突意外没了，故建议保留以便后续研究）
 LambdaParameters:
     '(' LambdaParameterList ')' {
         $$ = $2;
-    }   // RPAREN_LambdaParameters
+    } // LambdaParameters 中的 ')' 符号
     | '(' ')' {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
-    }                     // RPAREN_LambdaParameters
+    } // LambdaParameters 中的 ')' 符号
     | TYPE_IDENTIFIER_IdentifierforLambdaParameterList { $$ = $1; }
     | IdentifierComplement_IdentifierforLambdaParameterList { $$ = $1; }
-//    LPAREN_LambdaParameters LambdaParameterList ')' // RPAREN_LambdaParameters
-//    | LPAREN_LambdaParameters ')' // RPAREN_LambdaParameters
+// %token LPAREN_LambdaParameters            // LambdaParameters 中的 '(' 符号（之前有冲突，调试后发现冲突意外没了，故建议保留以便后续研究）
+// %token LPAREN_LambdaParameters            // LambdaParameters 中的 '(' 符号（之前有冲突，调试后发现冲突意外没了，故建议保留以便后续研究）
 //    | IDENTIFIER_LambdaParameters
 ;
 
+// lambda 参数列表。
 LambdaParameterList:
     LambdaParameterforLambdaParameterList { $$ = $1; }
     | IdentifierforLambdaParameterList { $$ = $1; }
 ;
 
+// lambda 标识符参数列表。
 IdentifierforLambdaParameterList:
     TYPE_IDENTIFIER_IdentifierforLambdaParameterList {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -4010,11 +4601,13 @@ IdentifierforLambdaParameterList:
     }
 ;
 
+// lambda 标识符补全列表。
 IdentifierComplement_IdentifierforLambdaParameterList:
     VAR_IdentifierComplement_IdentifierforLambdaParameterList { $$ = $1; }
     | YIELD_IdentifierComplement_IdentifierforLambdaParameterList { $$ = $1; }
 ;
 
+// lambda 参数列表项。
 LambdaParameterforLambdaParameterList:
     LambdaParameter {
         $$ = make_list_node(AST_ARGUMENT_LIST, @$);
@@ -4026,6 +4619,7 @@ LambdaParameterforLambdaParameterList:
     }
 ;
 
+// 单个 lambda 参数。
 LambdaParameter:
     VariableModifiers LambdaParameterType TYPE_IDENTIFIER Dims {
         $$ = make_parameter_with_dims($2, $3, $4, @$);
@@ -4066,33 +4660,39 @@ LambdaParameter:
     | VariableArityParameter { $$ = $1; }
 ;
 
+// lambda 参数类型。
 LambdaParameterType:
     UnannType { $$ = $1; }
     | VAR { $$ = make_keyword_leaf("var", @1); }
 ;
 
+// lambda 体（表达式或块）。
 LambdaBody:
     Expression { $$ = $1; }
     | Block { $$ = $1; }
 ;
 
+// 赋值表达式入口（含条件表达式）。
 AssignmentExpression:
     ConditionalExpression { $$ = $1; }
     | Assignment { $$ = $1; }
 ;
 
+// 赋值表达式。
 Assignment:
     LeftHandSide AssignmentOperator Expression {
         $$ = make_assignment_node($1, $2, $3, @2);
     }
 ;
 
+// 赋值左值。
 LeftHandSide:
     CommonName { $$ = $1; }
     | FieldAccess { $$ = $1; }
     | ArrayAccess { $$ = $1; }
 ;
 
+// 赋值运算符。
 AssignmentOperator:
     '='  { $$ = make_keyword_leaf("=", @1); }
     | MUL_ASSIGN  { $$ = make_keyword_leaf("*=", @1); }
@@ -4108,6 +4708,7 @@ AssignmentOperator:
     | OR_ASSIGN  { $$ = make_keyword_leaf("|=", @1); }
 ;
 
+// 三元条件表达式。
 ConditionalExpression:
     ConditionalOrExpression  %prec PREC_ConditionalExpression_1 {
         $$ = $1;
@@ -4120,6 +4721,7 @@ ConditionalExpression:
     }
 ;
 
+// 逻辑或表达式。
 ConditionalOrExpression:
     ConditionalAndExpression %prec PREC_ConditionalOrExpression_1 {
         $$ = $1;
@@ -4130,6 +4732,7 @@ ConditionalOrExpression:
     }
 ;
 
+// 逻辑与表达式。
 ConditionalAndExpression:
     InclusiveOrExpression %prec PREC_ConditionalAndExpression_1 {
         $$ = $1;
@@ -4139,6 +4742,7 @@ ConditionalAndExpression:
     }
 ;
 
+// 按位或表达式。
 InclusiveOrExpression:
     ExclusiveOrExpression %prec PREC_InclusiveOrExpression_1 {
         $$ = $1;
@@ -4148,6 +4752,7 @@ InclusiveOrExpression:
     }
 ;
 
+// 按位异或表达式。
 ExclusiveOrExpression:
     AndExpression %prec PREC_ExclusiveOrExpression_1 {
         $$ = $1;
@@ -4157,6 +4762,7 @@ ExclusiveOrExpression:
     }
 ;
 
+// 按位与表达式。
 AndExpression:
     EqualityExpression %prec PREC_AndExpression_1 {
         $$ = $1;
@@ -4166,6 +4772,7 @@ AndExpression:
     }
 ;
 
+// 相等性表达式。
 EqualityExpression:
     RelationalExpression { $$ = $1; }
     | EqualityExpression EQ RelationalExpression %prec PREC_EqualityExpression {
@@ -4176,7 +4783,7 @@ EqualityExpression:
     }
 ;
 
-// 基础部分（不可递归扩展）
+// 基础部分（不可递归扩展
 SimpleRelationalExpression:
     ShiftExpression %prec PREC_SimpleRelationalExpression {
         $$ = $1;
@@ -4189,11 +4796,11 @@ RelationalExpression:
         $$ = $1;
     }
     | SimpleRelationalExpression INSTANCEOF ReferenceType %prec PREC_RelationalExpression {
-        $$ = make_binary_expr($1, "instanceof", $3, @2);
-    } // 仅允许单层 `instanceof`，下同
+        $$ = make_instanceof_expr($1, $3, @2);
+    } // 仅允许单?`instanceof`，下?
     | SimpleRelationalExpression INSTANCEOF Pattern %prec PREC_RelationalExpression {
-        $$ = make_binary_expr($1, "instanceof", $3, @2);
-    } // 仅允许单层 `instanceof`，下同
+        $$ = make_instanceof_expr($1, $3, @2);
+    } // 仅允许单?`instanceof`，下?
     | SimpleRelationalExpression '<' ShiftExpression %prec PREC_RelationalExpression {
         $$ = make_binary_expr($1, "<", $3, @2);
     }
@@ -4208,6 +4815,7 @@ RelationalExpression:
     }
 ;
 
+// 移位表达式。
 ShiftExpression:
     AdditiveExpression %prec PREC_ShiftExpression_1 {
         $$ = $1;
@@ -4223,6 +4831,7 @@ ShiftExpression:
     }
 ;
 
+// 加减表达式。
 AdditiveExpression:
     MultiplicativeExpression  %prec PREC_AdditiveExpression_1 {
         $$ = $1;
@@ -4235,6 +4844,7 @@ AdditiveExpression:
     }
 ;
 
+// 乘除模表达式。
 MultiplicativeExpression:
     UnaryExpression { $$ = $1; }
     | MultiplicativeExpression '*' UnaryExpression  %prec PREC_MultiplicativeExpression {
@@ -4248,6 +4858,7 @@ MultiplicativeExpression:
     }
 ;
 
+// 一元表达式。
 UnaryExpression:
     PreIncrementExpression { $$ = $1; }
     | PreDecrementExpression { $$ = $1; }
@@ -4262,18 +4873,21 @@ UnaryExpression:
     | UnaryExpressionNotPlusMinus { $$ = $1; }
 ;
 
+// 前置自增表达式。
 PreIncrementExpression:
     PREFIX_INC UnaryExpression %prec PREFIX_INC {
         $$ = make_unary_expr("++", $2, @1, false);
     }
 ;
 
+// 前置自减表达式。
 PreDecrementExpression:
     PREFIX_DEC UnaryExpression %prec PREFIX_DEC {
         $$ = make_unary_expr("--", $2, @1, false);
     }
 ;
 
+// 非正负号一元表达式。
 UnaryExpressionNotPlusMinus:
     PostfixExpression { $$ = $1; }
     | '~' UnaryExpression {
@@ -4286,9 +4900,10 @@ UnaryExpressionNotPlusMinus:
     | SwitchExpression { $$ = $1; }
 ;
 
+// 后缀表达式。
 PostfixExpression:
     Primary { $$ = $1; }
-    | CommonName      // 原 ExpressionName
+    | CommonName      // ?ExpressionName
     {
         $$ = $1;
     }
@@ -4296,24 +4911,27 @@ PostfixExpression:
     | PostDecrementExpression { $$ = $1; }
 ;
 
+// 后置自增表达式。
 PostIncrementExpression:
     PostfixExpression INC_OP %prec INC_OP {
         $$ = make_unary_expr("++", $1, @2, true);
     }
 ;
 
+// 后置自减表达式。
 PostDecrementExpression:
     PostfixExpression DEC_OP %prec DEC_OP {
         $$ = make_unary_expr("--", $1, @2, true);
     }
 ;
 
+// 强制类型转换。
 CastExpression:
     '(' PrimitiveType ')' UnaryExpression {
         $$ = make_cast_expr($2, $4, @1);
     }
     | '(' UnannPrimitiveType ')' UnaryExpression {
-        $$ = make_cast_expr($2, $4, @1);
+        $$ = make_cast_expr(make_type_node($2, @2), $4, @1);
     }
 //    | '(' ReferenceType AdditionalBounds ')' UnaryExpressionNotPlusMinus
 //    | '(' ReferenceType AdditionalBounds ')' LambdaExpression
@@ -4325,9 +4943,10 @@ CastExpression:
     }
 ;
 
+// switch 表达式。
 SwitchExpression:
     SWITCH '(' Expression ')' SwitchBlock {
-        AstNode *node = make_unary_stmt(AST_SWITCH, $3, @1);
+        AstNode *node = make_unary_stmt(AST_SWITCH_EXPR, $3, @1);
         if ($5) {
             ast_add_child(node, $5);
         }
@@ -4338,8 +4957,9 @@ SwitchExpression:
 
 %%
 
-
-// 修改 make_class_basic 以接收所有组件
+/* 尾部实现：语法动作中引用的辅助函数。 */
+// 修改 make_class_basic 以接收所有组
+// 构造类声明基础节点。
 static AstNode *make_class_basic(int line, int column, 
                                AstNode *modifiers, 
                                AstNode *name, 
@@ -4364,16 +4984,19 @@ static AstNode *make_class_basic(int line, int column,
     }
     // 4. 添加父类 (extends Base)
     if (super_class) {
-        // 可以选择在这里加一个 keyword leaf "extends" 或者直接加节点
-        ast_add_child(node, super_class);
+        // 可以选择在这里加一keyword leaf "extends" 或者直接加节点
+        AstNode *clause = make_clause_node(AST_EXTENDS, super_class, line, column);
+        ast_add_child(node, clause);
     }
     // 5. 添加接口 (implements A, B)
     if (super_interfaces) {
-        ast_add_child(node, super_interfaces);
+        AstNode *clause = make_clause_node(AST_IMPLEMENTS, super_interfaces, line, column);
+        ast_add_child(node, clause);
     }
     // 6. 添加 permits (sealed class)
     if (permits) {
-        ast_add_child(node, permits);
+        AstNode *clause = make_clause_node(AST_PERMITS, permits, line, column);
+        ast_add_child(node, clause);
     }
     // 7. 添加类体 ({...})
     if (body) {
@@ -4382,8 +5005,9 @@ static AstNode *make_class_basic(int line, int column,
     return node;
 }
 
+// 根据标签创建对应的块节点（普通/静态/实例初始化）。
 static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE loc) {
-    AstKind kind = AST_UNKNOWN;
+    AstKind kind = AST_BLOCK;
     if (label) {
         if (strcmp(label, "static-init") == 0) {
             kind = AST_STATIC_INIT;
@@ -4391,16 +5015,19 @@ static AstNode *wrap_labeled_block(const char *label, AstNode *block, YYLTYPE lo
             kind = AST_INSTANCE_INIT;
         }
     }
-    AstNode *n = AST_BRANCH_AT(kind, loc, 0);
-    if (kind == AST_UNKNOWN && label) {
-        ast_set_text(n, label);
+    if (kind == AST_BLOCK) {
+        return block ? block : AST_BRANCH_AT(AST_BLOCK, loc, 0);
     }
-    if (block) ast_add_child(n, block);
+    AstNode *n = AST_BRANCH_AT(kind, loc, 0);
+    if (block) {
+        ast_add_child(n, block);
+    }
     return n;
 }
 
 
 
+// 构造接口声明基础节点。
 static AstNode *make_interface_basic(int line, int column, 
                                    AstNode *modifiers,
                                    AstNode *name, 
@@ -4413,13 +5040,41 @@ static AstNode *make_interface_basic(int line, int column,
     if (modifiers) ast_add_child(node, modifiers);
     if (name) ast_add_child(node, name);
     if (type_params) ast_add_child(node, type_params);
-    if (extends_interfaces) ast_add_child(node, extends_interfaces);
-    if (permits) ast_add_child(node, permits);
+    if (extends_interfaces) {
+        AstNode *clause = make_clause_node(AST_EXTENDS, extends_interfaces, line, column);
+        ast_add_child(node, clause);
+    }
+    if (permits) {
+        AstNode *clause = make_clause_node(AST_PERMITS, permits, line, column);
+        ast_add_child(node, clause);
+    }
     if (body) ast_add_child(node, body);
     
     return node;
 }
 
+// 构造注解类型声明基础节点。
+static AstNode *make_annotation_decl_basic(int line, int column, 
+                                           AstNode *modifiers,
+                                           AstNode *name, 
+                                           AstNode *type_params,
+                                           AstNode *extends_interfaces,
+                                           AstNode *permits,
+                                           AstNode *body) {
+    AstNode *node = make_interface_basic(line, column,
+                                         modifiers,
+                                         name,
+                                         type_params,
+                                         extends_interfaces,
+                                         permits,
+                                         body);
+    if (node) {
+        node->kind = AST_ANNOTATION_DECL;
+    }
+    return node;
+}
+
+// 构造注解节点。
 static AstNode *make_annotation_node(AstNode *name, YYLTYPE loc) {
     AstNode *node = ast_branch(AST_ANNOTATION, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (name) {
@@ -4428,6 +5083,7 @@ static AstNode *make_annotation_node(AstNode *name, YYLTYPE loc) {
     return node;
 }
 
+// 构造类型节点（必要时包一层 AST_TYPE）。
 static AstNode *make_type_node(AstNode *core, YYLTYPE loc) {
     if (core && core->kind == AST_TYPE) {
         return core;
@@ -4439,6 +5095,7 @@ static AstNode *make_type_node(AstNode *core, YYLTYPE loc) {
     return node;
 }
 
+// 构造类型形参节点。
 static AstNode *make_type_parameter_node(AstNode *name, AstNode *bounds, YYLTYPE loc) {
     AstNode *node = ast_branch(AST_TYPE_PARAMETER, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
     if (name) {
@@ -4450,14 +5107,40 @@ static AstNode *make_type_parameter_node(AstNode *name, AstNode *bounds, YYLTYPE
     return node;
 }
 
-static AstNode *make_type_argument_node(AstNode *value, YYLTYPE loc) {
-    AstNode *node = ast_branch(AST_TYPE_ARGUMENT, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
-    if (value) {
-        ast_add_child(node, value);
+// 构造类型实参：类型。
+static AstNode *make_type_argument_type_node(AstNode *type_node, YYLTYPE loc) {
+    AstNode *node = ast_branch(AST_TYPE_ARGUMENT_TYPE, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    if (type_node) {
+        ast_add_child(node, type_node);
     }
     return node;
 }
 
+// 构造类型实参：通配符。
+static AstNode *make_type_argument_wildcard_node(AstNode *wildcard_node, YYLTYPE loc) {
+    AstNode *node = ast_branch(AST_TYPE_ARGUMENT_WILDCARD, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    if (wildcard_node) {
+        ast_add_child(node, wildcard_node);
+    }
+    return node;
+}
+
+// 构造泛型边界节点（extends）。
+static AstNode *make_type_bound_node(const char *kind, AstNode *primary, AstNode *additional, YYLTYPE loc) {
+    AstNode *node = ast_branch(AST_TYPE_BOUND, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
+    if (kind) {
+        ast_set_text(node, kind);
+    }
+    if (primary) {
+        ast_add_child(node, primary);
+    }
+    if (additional) {
+        ast_add_child(node, additional);
+    }
+    return node;
+}
+
+// 构造维度节点。
 static AstNode *make_dim_node(YYLTYPE loc) {
     return ast_branch(AST_DIM, AST_LOC_LINE(loc), AST_LOC_COL(loc), 0);
 }

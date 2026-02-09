@@ -1,8 +1,11 @@
 # Makefile for Java AST Parser
 
-CC = gcc
+MSYS_ROOT ?= C:/msys64
+PATH := $(MSYS_ROOT)/usr/bin;$(PATH)
+
+CC = $(MSYS_ROOT)/usr/bin/gcc.exe
 CFLAGS = -Wall -std=c99 -g
-YACC = bison
+YACC = $(MSYS_ROOT)/usr/bin/bison.exe
 
 # Source files
 YACC_SRC = parser.y
@@ -18,6 +21,9 @@ YACC_H = parser.tab.h
 # Object files
 OBJ = $(LEX_SRC:.c=.o) $(NEW_SRC:.c=.o) $(YACC_C:.c=.o) $(AST_SRC:.c=.o) $(MAIN_SRC:.c=.o)
 
+# Common headers
+DEPS = java_ast.h
+
 # Executable (Windows)
 TARGET = java_parser
 
@@ -31,7 +37,7 @@ YACC_FLAGS = -d -v
 $(YACC_C) $(YACC_H): $(YACC_SRC)
 	$(YACC) -d -v -o $(YACC_C) $(YACC_SRC)
 
-%.o: %.c
+%.o: %.c $(DEPS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:

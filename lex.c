@@ -55,14 +55,28 @@ static AstNode *make_token_node(int token, const char *lexeme, int line) {
             kind = AST_IDENTIFIER;
             break;
         case INTEGERLITERAL:
+            kind = AST_INT_LITERAL;
+            break;
         case FLOATINGPOINTLITERAL:
-        case NUMBER:
+            kind = AST_FLOAT_LITERAL;
+            break;
         case CHARACTERLITERAL:
+            kind = AST_CHAR_LITERAL;
+            break;
         case STRINGLITERAL:
+            kind = AST_STRING_LITERAL;
+            break;
         case TextBlock:
+            kind = AST_TEXT_BLOCK;
+            break;
         case TRUE:
         case FALSE:
+            kind = AST_BOOL_LITERAL;
+            break;
         case MY_NULL:
+            kind = AST_NULL_LITERAL;
+            break;
+        case NUMBER:
             kind = AST_LITERAL;
             break;
         default:

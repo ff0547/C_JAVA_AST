@@ -278,6 +278,16 @@ static bool lex_hex(const unsigned char *s, const unsigned char *e, unsigned lon
 
 // 修改后的 lex_str 函数
 // 处理字符串字面量和字符字面量
+// 追加原始字面量片段（不做反转义）
+static bool append_raw_bytes(char *buffer, size_t *buf_idx,
+                             const unsigned char *start, const unsigned char *end) {
+    size_t len = (size_t)(end - start);
+    if (*buf_idx + len >= MAX) return false;
+    memcpy(buffer + *buf_idx, start, len);
+    *buf_idx += len;
+    return true;
+}
+
 static bool lex_str(struct input_t *in, unsigned char q) {
     char buffer[MAX];
     size_t buf_idx = 0;
@@ -320,37 +330,65 @@ static bool lex_str(struct input_t *in, unsigned char q) {
             }
 
             // 反斜杠开始的转义（先识别常见的）
-            "\\'"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\''; continue; }
-            "\\\"" { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '"';  continue; }
-            "\\\\" { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\\'; continue; }
-            "\\n"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\n'; continue; }
-            "\\t"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\t'; continue; }
-            "\\b"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\b'; continue; }
-            "\\r"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\r'; continue; }
-            "\\f"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\f'; continue; }
-            "\\v"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\v'; continue; }
-            "\\s"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = ' ';  continue; }
+            "\\'"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\''; }
+                     continue; }
+            "\\\"" { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '"'; }
+                     continue; }
+            "\\\\" { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\\'; }
+                     continue; }
+            "\\n"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\n'; }
+                     continue; }
+            "\\t"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\t'; }
+                     continue; }
+            "\\b"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\b'; }
+                     continue; }
+            "\\r"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\r'; }
+                     continue; }
+            "\\f"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\f'; }
+                     continue; }
+            "\\v"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\v'; }
+                     continue; }
+            "\\s"  { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                     else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = ' '; }
+                     continue; }
 
             // 八进制：\0 ~ \377（用你已有的 lex_oct）
-            "\\" [0-7]                   { unsigned long u; if (!lex_oct(in->tok, in->cur, &u)) return false;
-                                           if (buf_idx + 1 >= MAX) return false;
-                                           buffer[buf_idx++] = (char)u; continue; }
-            "\\" [0-7][0-7]              { unsigned long u; if (!lex_oct(in->tok, in->cur, &u)) return false;
-                                           if (buf_idx + 1 >= MAX) return false;
-                                           buffer[buf_idx++] = (char)u; continue; }
-            "\\" [0-3][0-7][0-7]         { unsigned long u; if (!lex_oct(in->tok, in->cur, &u)) return false;
-                                           if (buf_idx + 1 >= MAX) return false;
-                                           buffer[buf_idx++] = (char)u; continue; }
+            "\\" [0-7]                   { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                                           else { unsigned long u; if (!lex_oct(in->tok, in->cur, &u)) return false;
+                                                  if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = (char)u; }
+                                           continue; }
+            "\\" [0-7][0-7]              { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                                           else { unsigned long u; if (!lex_oct(in->tok, in->cur, &u)) return false;
+                                                  if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = (char)u; }
+                                           continue; }
+            "\\" [0-3][0-7][0-7]         { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                                           else { unsigned long u; if (!lex_oct(in->tok, in->cur, &u)) return false;
+                                                  if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = (char)u; }
+                                           continue; }
 
             // 十六进制：\x...
-            "\\x" [0-9a-fA-F]+           { unsigned long u; if (!lex_hex(in->tok, in->cur, &u)) return false;
-                                           if (buf_idx + 1 >= MAX) return false;
-                                           buffer[buf_idx++] = (char)u; continue; }
+            "\\x" [0-9a-fA-F]+           { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                                           else { unsigned long u; if (!lex_hex(in->tok, in->cur, &u)) return false;
+                                                  if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = (char)u; }
+                                           continue; }
 
             // Unicode：先做“安全处理”，避免 (char) 截断导致乱码/破坏
             // 如果你后续要做 UTF-8 编码输出，可以在这里把 u 转成 UTF-8 序列追加到 buffer。
-            "\\u" [0-9a-fA-F]{4}         { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '?'; continue; }
-            "\\U" [0-9a-fA-F]{8}         { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '?'; continue; }
+            "\\u" [0-9a-fA-F]{4}         { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                                           else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '?'; }
+                                           continue; }
+            "\\U" [0-9a-fA-F]{8}         { if (q == '"') { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; }
+                                           else { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '?'; }
+                                           continue; }
 
             // 普通字符：不是反斜杠、不是换行、不是 0
             [^\\\n\x00]                  { 
@@ -413,14 +451,14 @@ static bool lex_text_block(struct input_t *in) {
             }
 
             // 简单转义：\" \\ \n \t 等（按需补全）
-            "\\\"" { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '"';  continue; }
-            "\\\\" { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\\'; continue; }
-            "\\n"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\n'; continue; }
-            "\\t"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\t'; continue; }
-            "\\r"  { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '\r'; continue; }
+            "\\\"" { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; continue; }
+            "\\\\" { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; continue; }
+            "\\n"  { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; continue; }
+            "\\t"  { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; continue; }
+            "\\r"  { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; continue; }
 
             // Unicode 转义（如果你暂时不想做 UTF-8，就先放 ?，避免 char 截断造成乱码）
-            "\\u" [0-9a-fA-F]{4} { if (buf_idx + 1 >= MAX) return false; buffer[buf_idx++] = '?'; continue; }
+            "\\u" [0-9a-fA-F]{4} { if (!append_raw_bytes(buffer, &buf_idx, in->tok, in->cur)) return false; continue; }
 
             // 其它任意字符：写入当前字符
             [^] {
